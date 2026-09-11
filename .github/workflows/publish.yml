@@ -1,0 +1,49 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required by npm provenance (Sigstore OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci --ignore-scripts || npm install --ignore-scripts
+      - run: npm run build
+      - name: Publish to npm with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+      - name: Trigger huloglobal marketing rebuild
+        if: success()
+        # Fires the refresh-versions workflow on the marketing-site repo so
+        # the version chip on huloglobal.com/vendure-plugins/* reflects
+        # this publish within minutes instead of waiting for the hourly cron.
+        # Uses MARKETING_DISPATCH_TOKEN (a PAT with 'repo' scope on the
+        # marketing-site repo). If the secret isn't set the step logs a
+        # warning but doesn't fail the whole publish.
+        env:
+          TOKEN: ${{ secrets.MARKETING_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::MARKETING_DISPATCH_TOKEN not set — hourly cron will pick this up instead"
+            exit 0
+          fi
+          pkg=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          curl -sSL -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/exceeded/hulo-vendure-plugins-marketing-site/dispatches \
+            -d "{\"event_type\":\"plugin-published\",\"client_payload\":{\"pkg\":\"$pkg\",\"version\":\"$version\"}}"

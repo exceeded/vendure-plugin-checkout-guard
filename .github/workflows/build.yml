@@ -1,0 +1,47 @@
+name: Sanity check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify mandatory files
+        run: |
+          for f in package.json README.md CHANGELOG.md LICENSE; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+
+      - name: Validate package.json
+        run: |
+          node -e "
+            const p = require('./package.json');
+            const required = ['name', 'version', 'description', 'author', 'license', 'repository'];
+            for (const k of required) {
+              if (!p[k]) { console.error('::error::package.json missing ' + k); process.exit(1); }
+            }
+            if (!p.files || !p.files.length) { console.error('::error::package.json missing files[]'); process.exit(1); }
+            for (const must of ['README.md', 'CHANGELOG.md', 'LICENSE']) {
+              if (!p.files.includes(must)) { console.error('::error::files[] missing ' + must); process.exit(1); }
+            }
+            console.log('package.json OK — ' + p.name + '@' + p.version);
+          "
+
+      - name: Type-check (best-effort)
+        continue-on-error: true
+        run: |
+          npm install --no-save typescript@5.4 2>/dev/null || true
+          if [ -f tsconfig.json ]; then
+            npx --yes tsc -p tsconfig.json --noEmit --skipLibCheck || \
+              echo "::warning::tsc reported errors — usually missing @hulo/* peers, expected until published"
+          fi

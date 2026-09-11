@@ -1,0 +1,16 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HULO Checkout Guard">
+  <title>HULO Checkout Guard</title>
+  <!-- HULO family frame: navy rounded square -->
+  <rect width="64" height="64" rx="14" fill="#0f1419"/>
+  <!-- Payment card outline -->
+  <rect x="11" y="18" width="42" height="28" rx="4" fill="none" stroke="#ffffff" stroke-width="2.6"/>
+  <!-- Magnetic stripe -->
+  <rect x="11" y="24.5" width="42" height="5" fill="#ffffff" opacity="0.35"/>
+  <!-- Card detail line -->
+  <path d="M17 39 H29" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity="0.7"/>
+  <!-- Amber guard badge: small shield with tick over the card corner -->
+  <path d="M46 30 L54 33 V38.5 C54 44 50.6 47.8 46 49.5 C41.4 47.8 38 44 38 38.5 V33 Z"
+        fill="#0f1419" stroke="#f59e0b" stroke-width="2.6" stroke-linejoin="round"/>
+  <polyline points="42.2,39.6 45.2,42.6 50.2,36.6" fill="none" stroke="#f59e0b" stroke-width="2.6"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
