@@ -69,7 +69,7 @@ describe('settlePayment', () => {
         expect(r.metadata.amountReceived).toBe(12345);
         expect(calls[0].url).toBe('https://api.stripe.com/v1/payment_intents/pi_123/capture');
         expect(calls[0].init.headers.Authorization).toBe('Bearer sk_test_abc');
-        expect(calls[0].init.headers['Idempotency-Key']).toBe('cg-capture-pi_123');
+        expect(calls[0].init.headers['Idempotency-Key']).toMatch(/^cg-capture-pi_123-\d+$/);
         expect(calls[0].init.body).toBe('amount_to_capture=12345');
     });
     it('treats an already-captured intent as settled', async () => {
@@ -109,7 +109,7 @@ describe('cancelPayment', () => {
         const r: any = await stripeHoldPaymentHandler.cancelPayment(adminCtx, order, payment, [], method);
         expect(r?.success).toBe(true);
         expect(calls[0].url).toBe('https://api.stripe.com/v1/payment_intents/pi_123/cancel');
-        expect(calls[0].init.headers['Idempotency-Key']).toBe('cg-cancel-pi_123');
+        expect(calls[0].init.headers['Idempotency-Key']).toMatch(/^cg-cancel-pi_123-\d+$/);
     });
     it('refuses to cancel a hold that was already captured', async () => {
         responder = (_url, init) => init.method === 'POST'

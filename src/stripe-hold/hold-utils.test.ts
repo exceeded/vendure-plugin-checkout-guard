@@ -78,9 +78,12 @@ describe('misc', () => {
         expect(isPaymentIntentId('pi_')).toBe(false);
         expect(isPaymentIntentId(undefined)).toBe(false);
     });
-    it('idempotency keys are stable per intent', () => {
-        expect(captureIdempotencyKey('pi_1')).toBe('cg-capture-pi_1');
-        expect(cancelIdempotencyKey('pi_1')).toBe('cg-cancel-pi_1');
+    it('idempotency keys are stable within a minute and change across minutes', () => {
+        const t0 = new Date('2026-09-11T10:00:10Z'); const t1 = new Date('2026-09-11T10:00:50Z'); const t2 = new Date('2026-09-11T10:01:10Z');
+        expect(captureIdempotencyKey('pi_1', t0)).toBe(captureIdempotencyKey('pi_1', t1));
+        expect(captureIdempotencyKey('pi_1', t0)).not.toBe(captureIdempotencyKey('pi_1', t2));
+        expect(captureIdempotencyKey('pi_1', t0)).toMatch(/^cg-capture-pi_1-\d+$/);
+        expect(cancelIdempotencyKey('pi_1', t0)).toMatch(/^cg-cancel-pi_1-\d+$/);
     });
     it('formats amounts and never throws', () => {
         expect(formatMinor(123456, 'GBP')).toBe('£1,234.56');

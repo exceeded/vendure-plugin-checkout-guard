@@ -51,6 +51,9 @@ export interface BankTransferSweepResult {
     scanned: number;
     expired: number;
     reminded: number;
+    /** Orders whose bank payment was already cancelled but the order was not (a
+     *  failed cancelOrder on an earlier pass) and were cancelled on this pass. */
+    repaired: number;
     skipped: 'locked' | null;
 }
 
@@ -303,12 +306,12 @@ export class BankTransferService implements OnModuleInit {
                     loggerCtx,
                 );
             }
-            return { scanned: 0, expired: 0, reminded: 0, skipped: 'locked' };
+            return { scanned: 0, expired: 0, reminded: 0, repaired: 0, skipped: 'locked' };
         }
         this.lockedLogged = false;
 
         const candidates = await this.findAwaitingCandidates();
-        const result: BankTransferSweepResult = { scanned: candidates.length, expired: 0, reminded: 0, skipped: null };
+        const result: BankTransferSweepResult = { scanned: candidates.length, expired: 0, reminded: 0, repaired: 0, skipped: null };
         for (const c of candidates) {
             try {
                 const details = readBankTransferPublicDetails(c.metadata);
@@ -356,7 +359,48 @@ export class BankTransferService implements OnModuleInit {
                 Logger.error(`Bank transfer sweep failed for payment ${c.paymentId}: ${e.message}`, loggerCtx);
             }
         }
+        result.repaired = await this.repairStranded();
         return result;
+    }
+
+    /**
+     * A previous pass cancelled the payment but `cancelOrder` failed (the two
+     * steps are separate Vendure operations): the order sits in
+     * PaymentAuthorized with only Cancelled bank payments and nothing else
+     * would ever touch it. Finish the cancellation.
+     */
+    private async repairStranded(): Promise<number> {
+        const codes = await this.bankTransferMethodCodes();
+        if (!codes.length) return 0;
+        const ph = this.placeholders(codes.length);
+        const rows: Array<{ orderId: ID; orderCode: string }> = await this.db.query(
+            `SELECT o.id AS orderId, o.code AS orderCode
+             FROM \`order\` o
+             WHERE o.state = 'PaymentAuthorized'
+               AND EXISTS (SELECT 1 FROM payment p WHERE p.orderId = o.id AND p.method IN (${ph}) AND p.state = 'Cancelled')
+               AND NOT EXISTS (SELECT 1 FROM payment p2 WHERE p2.orderId = o.id AND p2.state IN ('Authorized', 'Settled'))
+             LIMIT 100`,
+            codes,
+        ).catch(() => []);
+        let repaired = 0;
+        for (const r of rows ?? []) {
+            try {
+                const order = await this.connection.rawConnection.getRepository(Order).findOne({ where: { id: r.orderId as any }, relations: ['channels'] });
+                if (!order) continue;
+                const ctx = await this.contextForOrder(order);
+                const res = await this.orderService.cancelOrder(ctx, { orderId: order.id, reason: 'Bank transfer not received (order left open by an earlier failed cancellation)' });
+                if (isGraphQlErrorResult(res)) {
+                    Logger.warn(`Could not finish cancelling stranded order ${r.orderCode}: ${res.message}`, loggerCtx);
+                    continue;
+                }
+                await this.db.query(`UPDATE checkout_guard_bank_transfer SET cancelledAt = COALESCE(cancelledAt, NOW()) WHERE orderId = ?`, [order.id]);
+                repaired++;
+                Logger.info(`Finished cancelling stranded bank-transfer order ${r.orderCode}`, loggerCtx);
+            } catch (e: any) {
+                Logger.error(`Stranded-order repair failed for ${r.orderCode}: ${e.message}`, loggerCtx);
+            }
+        }
+        return repaired;
     }
 
     /**

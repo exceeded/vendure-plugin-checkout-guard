@@ -242,6 +242,7 @@ run('@huloglobal/vendure-plugin-checkout-guard (MariaDB)', () => {
         // Sweep "now": nothing due yet.
         const early = await bank().sweep(new Date());
         expect(early.expired).toBe(0);
+        expect(early.repaired).toBe(0);
 
         // Admin marks it received → settled, order PaymentSettled.
         const received = await bank().markReceived(num(payment.id));

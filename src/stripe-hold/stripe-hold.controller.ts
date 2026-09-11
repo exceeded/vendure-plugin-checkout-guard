@@ -71,9 +71,10 @@ export class StripeHoldController {
             const outcome = await this.service.handleEvent(event, req);
             if (!res.headersSent) res.status(outcome.status).send(outcome.message);
         } catch (e: any) {
-            // Signature passed: never let Stripe retry into the same failure.
+            // Signature passed but handling failed: 5xx so Stripe retries the
+            // delivery — a transient DB error must never lose a hold.
             Logger.error(`Stripe webhook handling threw: ${e?.message || e}`, loggerCtx, e?.stack);
-            if (!res.headersSent) res.status(HttpStatus.OK).send('Error logged');
+            if (!res.headersSent) res.status(HttpStatus.INTERNAL_SERVER_ERROR).send('Error logged — retry');
         }
     }
 

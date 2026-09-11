@@ -5,6 +5,21 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-09-11
+
+### Fixed
+- **Admin capture / release of a hold on a non-default channel** used the admin request's channel, where the channel's `stripe-hold` method does not exist (`error.payment-method-not-found`). Both now act in the order's own channel, like the cron and webhook paths.
+- **Webhook responses:** an unexpected error while recording a hold, or a locked premium tier, now answers 5xx so Stripe retries the delivery instead of the hold being lost; an ops alert (at most hourly) explains the locked case.
+- **Duplicate webhook deliveries** for one PaymentIntent are serialised (in-process mutex plus a row lock on the order), so two Authorized payments can no longer be attached to one intent.
+- Ops fan-out (Slack / webhooks / SMTP) no longer runs inside the webhook's database transaction.
+- Capture / cancel idempotency keys carry a minute bucket, so a failed capture is not replayed as the same error for 24 hours.
+- Safety capture releases (never charges) a hold whose order was cancelled.
+- Bank-transfer sweep finishes cancelling orders that a failed `cancelOrder` left in PaymentAuthorized with a cancelled payment (`repaired` in the sweep result).
+- Admin UI: the Bank transfers, Holds and Funnel tabs read the fields the server actually sends.
+- Overview KPIs count holds and transfers by the handler behind each channel's payment method, not by a guessed method code.
+- Shop API rate limiter: multipart (file-upload) GraphQL requests are limited too.
+- `trustedClientIp.trustCloudflareHeader` (default true) lets deployments reachable without Cloudflare ignore `cf-connecting-ip`.
+
 ## [0.1.0] — 2026-09-11
 
 ### Added

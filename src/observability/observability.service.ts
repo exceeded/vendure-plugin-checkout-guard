@@ -225,9 +225,20 @@ export class ObservabilityService implements OnModuleInit {
     }
 
     /** Authorized payments for a handler code (holds pending / bank awaiting). */
-    async countAuthorizedPayments(methodCode: string, channelId?: number | null): Promise<number> {
-        const params: any[] = [methodCode];
-        let sql = `SELECT COUNT(*) AS n FROM payment p WHERE p.state = 'Authorized' AND p.method = ?`;
+    /** PaymentMethod codes (across channels) whose handler has this code. */
+    async methodCodesForHandler(handlerCode: string): Promise<string[]> {
+        const rows: Array<{ code: string }> = await this.db.query(
+            `SELECT code FROM payment_method WHERE handler LIKE ?`, [`%"code":"${handlerCode.replace(/[%_"\\]/g, '')}"%`],
+        ).catch(() => []);
+        return (rows || []).map(r => r.code).filter(Boolean);
+    }
+
+    /** Authorized payments for a HANDLER (resolved to every method code using it). */
+    async countAuthorizedPayments(handlerCode: string, channelId?: number | null): Promise<number> {
+        const codes = await this.methodCodesForHandler(handlerCode);
+        if (!codes.length) return 0;
+        const params: any[] = [...codes];
+        let sql = `SELECT COUNT(*) AS n FROM payment p WHERE p.state = 'Authorized' AND p.method IN (${codes.map(() => '?').join(',')})`;
         if (channelId) {
             sql += ` AND EXISTS (SELECT 1 FROM order_channels_channel oc WHERE oc.orderId = p.orderId AND oc.channelId = ?)`;
             params.push(channelId);
@@ -302,8 +313,8 @@ export class ObservabilityService implements OnModuleInit {
 
     async summary(channelId?: number | null): Promise<ObservabilitySummary> {
         const [holdsPending, bankAwaiting, failed7d, clientDeclined7d, orphansOpen, drift30d, funnel] = await Promise.all([
-            this.countAuthorizedPayments(holdMethodCode(), channelId),
-            this.countAuthorizedPayments(BANK_METHOD_CODE, channelId),
+            this.countAuthorizedPayments('stripe-hold', channelId),
+            this.countAuthorizedPayments('bank-transfer', channelId),
             this.countPaymentEvents(['failed'], 7, channelId),
             this.countPaymentEvents(['client_declined'], 7, channelId),
             this.countOpenOrphans(channelId),

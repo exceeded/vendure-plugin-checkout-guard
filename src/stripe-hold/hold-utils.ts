@@ -104,11 +104,14 @@ export function isPaymentIntentId(id: unknown): id is string {
 }
 
 /** Deterministic idempotency keys so Stripe dedupes retried calls. */
-export function captureIdempotencyKey(paymentIntentId: string): string {
-    return `cg-capture-${paymentIntentId}`;
+/** Keys carry a minute bucket: retries inside a minute are deduped by
+ *  Stripe, while a later attempt after a failure gets a fresh key (Stripe
+ *  replays the original *error* for 24h under the same key). */
+export function captureIdempotencyKey(paymentIntentId: string, at: Date = new Date()): string {
+    return `cg-capture-${paymentIntentId}-${Math.floor(at.getTime() / 60_000)}`;
 }
-export function cancelIdempotencyKey(paymentIntentId: string): string {
-    return `cg-cancel-${paymentIntentId}`;
+export function cancelIdempotencyKey(paymentIntentId: string, at: Date = new Date()): string {
+    return `cg-cancel-${paymentIntentId}-${Math.floor(at.getTime() / 60_000)}`;
 }
 export function refundIdempotencyKey(paymentIntentId: string, amount: number, nonce: string): string {
     return `cg-refund-${paymentIntentId}-${amount}-${nonce}`;

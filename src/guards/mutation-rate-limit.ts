@@ -143,7 +143,11 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
             next();
             return;
         }
-        const invoked = extractMutationNames(req.body, names);
+        // A multipart (file-upload) GraphQL request hides its document in a
+        // form field we do not parse; treat it as invoking every limited
+        // mutation so it cannot be used to bypass the limits.
+        const contentType = String(req.headers?.['content-type'] || '');
+        const invoked = /^multipart\/form-data/i.test(contentType) ? names : extractMutationNames(req.body, names);
         if (invoked.length === 0) {
             next();
             return;

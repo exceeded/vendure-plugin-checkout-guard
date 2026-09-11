@@ -7,7 +7,7 @@ import type { Request } from 'express';
 import {
     computeHoldUntil, formatMinor, fromStripeMinorUnits, holdUntilFromMetadata, isPaymentIntentId, parseVendureMetadata,
 } from './hold-utils';
-import { effectiveStripeHoldOptions, getStripeHoldRuntime, notifyOpsSafe, recordPaymentEventSafe } from './runtime';
+import { effectiveStripeHoldOptions, getStripeHoldRuntime, notifyOpsSafe, recordPaymentEventSafe, StripeHoldOpsEvent } from './runtime';
 import type { StripePaymentIntentLike } from './stripe-api';
 import { getHoldMethodCodes, getHoldPaymentMethodForChannel } from './stripe-key';
 
@@ -58,6 +58,9 @@ export interface SafetyCaptureReport {
  */
 @Injectable()
 export class StripeHoldService {
+    private static lastLockedAlertAt = 0;
+    /** One in-flight handler per PaymentIntent: duplicate deliveries wait for the first. */
+    private inflight = new Map<string, Promise<WebhookOutcome>>();
     private premiumWarned = false;
 
     constructor(
@@ -123,7 +126,14 @@ export class StripeHoldService {
             return { status: 200, message: 'Event has no Vendure metadata, skipped' };
         }
         if (!this.premium()) {
-            return { status: 200, message: 'Checkout Guard premium locked, event ignored' };
+            // Not 200: Stripe keeps retrying (with back-off, for days) so the
+            // hold is attached as soon as a licence is active again.
+            const now = Date.now();
+            if (now - StripeHoldService.lastLockedAlertAt > 60 * 60 * 1000) {
+                StripeHoldService.lastLockedAlertAt = now;
+                await notifyOpsSafe({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id} for order ${meta.orderCode} NOT recorded — Checkout Guard premium is locked (licence missing or expired). Stripe will retry; activate a licence.`, orderCode: meta.orderCode, paymentIntentId: pi.id });
+            }
+            return { status: 503, message: 'Checkout Guard premium locked — retry later' };
         }
         switch (type) {
             case 'payment_intent.amount_capturable_updated':
@@ -140,8 +150,19 @@ export class StripeHoldService {
         }
     }
 
-    private async onAmountCapturable(pi: StripePaymentIntentLike, meta: NonNullable<ReturnType<typeof parseVendureMetadata>>, req?: Request): Promise<WebhookOutcome> {
+    private onAmountCapturable(pi: StripePaymentIntentLike, meta: NonNullable<ReturnType<typeof parseVendureMetadata>>, req?: Request): Promise<WebhookOutcome> {
+        const running = this.inflight.get(pi.id);
+        if (running) return running;
+        const run = this.onAmountCapturableInner(pi, meta, req).finally(() => this.inflight.delete(pi.id));
+        this.inflight.set(pi.id, run);
+        return run;
+    }
+
+    private async onAmountCapturableInner(pi: StripePaymentIntentLike, meta: NonNullable<ReturnType<typeof parseVendureMetadata>>, req?: Request): Promise<WebhookOutcome> {
         const { orderCode, orderId, channelToken, languageCode } = meta;
+        // Ops fan-out (webhooks, SMTP) never runs inside the DB transaction.
+        const deferred: StripeHoldOpsEvent[] = [];
+        const flush = async () => { for (const ev of deferred.splice(0)) await notifyOpsSafe(ev); };
         if (pi.status !== 'requires_capture' || !(Number(pi.amount_capturable) > 0)) {
             return { status: 200, message: `PaymentIntent ${pi.id} is ${pi.status}, nothing to hold` };
         }
@@ -153,17 +174,19 @@ export class StripeHoldService {
         }
         const outerCtx = await this.createContext(channel.token, languageCode, req);
         try {
-            return await this.connection.withTransaction(outerCtx, async ctx => {
+            const outcome = await this.connection.withTransaction(outerCtx, async ctx => {
                 const order = await this.orderService.findOneByCode(ctx, orderCode, ['payments', 'channels']);
                 if (!order) {
                     Logger.error(`Order ${orderCode} not found for hold ${pi.id}`, loggerCtx);
-                    await notifyOpsSafe({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id}: order ${orderCode} not found`, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+                    deferred.push({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id}: order ${orderCode} not found`, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
                     return { status: 200, message: 'Order not found' };
                 }
+                // Serialise concurrent deliveries of the same event on the order row.
+                await this.connection.getRepository(ctx, Order).createQueryBuilder('o').setLock('pessimistic_write').where('o.id = :id', { id: order.id }).getOne();
                 if (String(order.id) !== String(orderId)) {
                     Logger.warn(`Order ${orderCode} id ${order.id} does not match metadata orderId ${orderId}; continuing by code`, loggerCtx);
                 }
-                const existing = (order.payments || []).find(p => p.transactionId === pi.id);
+                const existing = await this.connection.getRepository(ctx, Payment).findOne({ where: { transactionId: pi.id } as any });
                 if (existing) {
                     return { status: 200, message: `Hold ${pi.id} already recorded as payment ${existing.id} (${existing.state})` };
                 }
@@ -172,7 +195,7 @@ export class StripeHoldService {
                     if (isGraphQlErrorResult(t)) {
                         const msg = `Cannot move order ${orderCode} (${order.state}) to ArrangingPayment for hold ${pi.id}: ${t.message}`;
                         Logger.error(msg, loggerCtx);
-                        await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+                        deferred.push({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
                         return { status: 200, message: 'Order state transition failed' };
                     }
                 }
@@ -180,7 +203,7 @@ export class StripeHoldService {
                 if (!method) {
                     const msg = `No PaymentMethod with handler 'stripe-hold' on channel ${channel.code}; hold ${pi.id} for ${orderCode} left uncaptured`;
                     Logger.error(msg, loggerCtx);
-                    await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+                    deferred.push({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
                     return { status: 200, message: 'No stripe-hold payment method on channel' };
                 }
                 const result = await this.orderService.addPaymentToOrder(ctx, order.id, {
@@ -195,38 +218,42 @@ export class StripeHoldService {
                 if (!(result instanceof Order)) {
                     const msg = `addPaymentToOrder failed for hold ${pi.id} on ${orderCode}: ${(result as any).message}`;
                     Logger.error(msg, loggerCtx);
-                    await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+                    deferred.push({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
                     return { status: 200, message: 'addPaymentToOrder failed' };
                 }
                 const payment = (result.payments || []).find(p => p.transactionId === pi.id);
                 const held = fromStripeMinorUnits(Number(pi.amount_capturable), result.currencyCode);
                 Logger.info(`Hold ${pi.id} recorded on order ${orderCode} as Authorized (${formatMinor(held, result.currencyCode)})`, loggerCtx);
-                await notifyOpsSafe({
+                deferred.push({
                     event: 'hold.authorized', orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code,
                     text: `Card hold authorised for order ${orderCode}: ${formatMinor(held, result.currencyCode)} (${pi.id}) — capture within ${effectiveStripeHoldOptions().safetyCaptureDays} days`,
                 });
                 if (held !== result.totalWithTax) {
                     const msg = `Hold ${pi.id} amount ${formatMinor(held, result.currencyCode)} differs from order ${orderCode} total ${formatMinor(result.totalWithTax, result.currencyCode)}`;
                     Logger.warn(msg, loggerCtx);
-                    await notifyOpsSafe({ event: 'hold.amount_mismatch', text: msg, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
+                    deferred.push({ event: 'hold.amount_mismatch', text: msg, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
                 }
                 const { autoCaptureBelowMinor } = effectiveStripeHoldOptions();
                 if (payment && Number.isFinite(Number(autoCaptureBelowMinor)) && held < Number(autoCaptureBelowMinor)) {
                     const settled = await this.orderService.settlePayment(ctx, payment.id);
                     if (isGraphQlErrorResult(settled)) {
                         Logger.warn(`Auto-capture of ${pi.id} (${orderCode}) failed: ${settled.message}`, loggerCtx);
-                        await notifyOpsSafe({ event: 'hold.capture_failed', text: `Auto-capture failed for ${orderCode}: ${settled.message}`, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+                        deferred.push({ event: 'hold.capture_failed', text: `Auto-capture failed for ${orderCode}: ${settled.message}`, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
                     } else {
-                        await notifyOpsSafe({ event: 'hold.auto_captured', text: `Auto-captured ${formatMinor(held, result.currencyCode)} for order ${orderCode} (below threshold)`, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
+                        deferred.push({ event: 'hold.auto_captured', text: `Auto-captured ${formatMinor(held, result.currencyCode)} for order ${orderCode} (below threshold)`, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
                     }
                 }
                 return { status: 200, message: `Hold ${pi.id} recorded on order ${orderCode}` };
             });
+            await flush();
+            return outcome;
         } catch (e: any) {
+            await flush();
             const msg = `Unhandled error recording hold ${pi.id} for ${orderCode}: ${e?.message || e}`;
             Logger.error(msg, loggerCtx, e?.stack);
             await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
-            return { status: 200, message: 'Internal error recorded' };
+            // 5xx: Stripe retries, so a transient DB error never loses the hold.
+            return { status: 500, message: 'Internal error — retry' };
         }
     }
 
@@ -364,8 +391,11 @@ export class StripeHoldService {
         if (payment.state !== 'Authorized') return { ok: false, paymentId, state: payment.state, error: `payment_is_${payment.state.toLowerCase()}` };
         const orderCode = payment.order?.code || '?';
         const currency = payment.order?.currencyCode || '';
+        // The request ctx proves the caller may see the order; the payment
+        // method lives on the ORDER's channel, so act in that channel.
+        const actx = (await this.contextForPayment(payment)) ?? ctx;
         try {
-            const result = await this.connection.withTransaction(ctx, tctx => this.orderService.settlePayment(tctx, paymentId));
+            const result = await this.connection.withTransaction(actx, tctx => this.orderService.settlePayment(tctx, paymentId));
             if (isGraphQlErrorResult(result)) {
                 const msg = (result as any).paymentErrorMessage || result.message;
                 Logger.warn(`Capture of hold ${payment.transactionId} (${orderCode}) by ${by} failed: ${msg}`, loggerCtx);
@@ -396,8 +426,9 @@ export class StripeHoldService {
         if (payment.state !== 'Authorized') return { ok: false, paymentId, state: payment.state, error: `payment_is_${payment.state.toLowerCase()}` };
         const orderCode = payment.order?.code || '?';
         const currency = payment.order?.currencyCode || '';
+        const actx = (await this.contextForPayment(payment)) ?? ctx;
         try {
-            const result = await this.connection.withTransaction(ctx, tctx => this.orderService.cancelPayment(tctx, paymentId));
+            const result = await this.connection.withTransaction(actx, tctx => this.orderService.cancelPayment(tctx, paymentId));
             if (isGraphQlErrorResult(result)) {
                 const msg = (result as any).paymentErrorMessage || result.message;
                 Logger.warn(`Release of hold ${payment.transactionId} (${orderCode}) by ${by} failed: ${msg}`, loggerCtx);
@@ -437,9 +468,14 @@ export class StripeHoldService {
             const authorisedAt = p.createdAt instanceof Date ? p.createdAt : new Date(p.createdAt as any);
             const due = holdUntilFromMetadata(p.metadata) || computeHoldUntil(authorisedAt, safetyCaptureDays);
             if (due.getTime() > now.getTime()) { report.skipped++; continue; }
-            if (p.order && ['Cancelled'].includes(p.order.state)) { report.skipped++; continue; }
             const ctx = await this.contextForPayment(p);
             if (!ctx) { report.failed++; Logger.warn(`Safety capture: no channel for payment ${p.id}`, loggerCtx); continue; }
+            if (p.order && p.order.state === 'Cancelled') {
+                // Never charge a cancelled order: release the funds instead.
+                const rel = await this.cancel(ctx, p.id, 'expired');
+                if (rel.ok) report.skipped++; else report.failed++;
+                continue;
+            }
             const r = await this.capture(ctx, p.id, 'cron');
             if (r.ok) report.captured++; else report.failed++;
         }

@@ -945,7 +945,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     loadHolds() {
         this.holdsLoading = true;
         this.http.get<any>(`${API}/holds`).subscribe({
-            next: r => { this.holds = this.asList<HoldRow>(r, 'holds', 'items'); this.holdsLoading = false; this.cdr.markForCheck(); },
+            next: r => { this.holds = this.asList<HoldRow>(r, 'items', 'holds').map((h: any) => ({ ...h, currency: h.currency ?? h.currencyCode, transactionId: h.transactionId ?? h.paymentIntentId })); this.holdsLoading = false; this.cdr.markForCheck(); },
             error: e => { this.holdsLoading = false; this.notification.error(this.errMsg(e, 'Could not load holds')); this.cdr.markForCheck(); },
         });
     }
@@ -955,7 +955,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     loadBank() {
         this.bankLoading = true;
         this.http.get<any>(`${API}/bank-transfers`, { params: { status: this.bankStatus } }).subscribe({
-            next: r => { this.bank = this.asList<BankRow>(r, 'transfers', 'bankTransfers', 'items'); this.bankLoading = false; this.cdr.markForCheck(); },
+            next: r => { this.bank = this.asList<BankRow>(r, 'rows', 'transfers', 'bankTransfers', 'items').map((b: any) => ({ ...b, amount: b.amount ?? b.amountMinor, reference: b.reference ?? b.orderCode, state: b.state ?? b.paymentState })); this.bankLoading = false; this.cdr.markForCheck(); },
             error: e => { this.bankLoading = false; this.notification.error(this.errMsg(e, 'Could not load bank transfers')); this.cdr.markForCheck(); },
         });
     }
@@ -1242,7 +1242,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
             for (const s of r.steps) {
                 const key = String(s.step ?? s.key ?? s.name ?? '');
                 if (!key) continue;
-                counts[key] = Number(s.count ?? s.sessions ?? s.total ?? 0) || 0;
+                counts[key] = Number(s.unique ?? s.count ?? s.sessions ?? s.events ?? s.total ?? 0) || 0;
                 if (typeof s.dropOffPct === 'number') serverDrop[key] = s.dropOffPct;
                 else if (typeof s.dropOff === 'number') serverDrop[key] = s.dropOff;
             }

@@ -5,6 +5,8 @@ import type { Middleware } from '@vendure/core';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 export interface TrustedClientIpOptions {
+    /** Honour `cf-connecting-ip` (default true). Set false when the API is reachable without Cloudflare. */
+    trustCloudflareHeader?: boolean;
     /** Header carrying the real client IP, set by the storefront's server-side proxy. Default `x-real-client-ip`. */
     header?: string;
     /** Header carrying the shared secret that proves the request came from the proxy. Default `x-checkout-guard-proxy`. */
@@ -80,12 +82,15 @@ export function normaliseIp(candidate: string | null | undefined): string | null
  *
  * Returns `null` when nothing usable is present.
  */
-export function getClientIp(req: ClientIpSource | null | undefined, opts?: Pick<TrustedClientIpOptions, 'header'>): string | null {
+export function getClientIp(req: ClientIpSource | null | undefined, opts?: Pick<TrustedClientIpOptions, 'header' | 'trustCloudflareHeader'>): string | null {
     if (!req || !req.headers) return null;
     const header = (opts?.header || DEFAULT_TRUSTED_CLIENT_IP_HEADER).toLowerCase();
+    // `cf-connecting-ip` is only meaningful when Cloudflare is the sole way
+    // to reach the API (an origin reachable directly could be sent any value).
+    const trustCf = opts?.trustCloudflareHeader !== false;
     const candidates: Array<string | undefined> = [
         headerValue(req.headers, header),
-        headerValue(req.headers, 'cf-connecting-ip'),
+        trustCf ? headerValue(req.headers, 'cf-connecting-ip') : undefined,
         headerValue(req.headers, 'x-forwarded-for')?.split(',')[0],
         req.socket?.remoteAddress,
         req.ip,
