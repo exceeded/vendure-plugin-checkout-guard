@@ -75,6 +75,10 @@ interface CandidateRow {
     reminderSentAt: string | Date | null;
 }
 
+/**
+ * @docsCategory Services
+ * @category Services
+ */
 @Injectable()
 export class BankTransferService implements OnModuleInit {
     private lockedLogged = false;

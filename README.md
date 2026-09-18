@@ -2,6 +2,8 @@
 
 <p><img src="./logo.svg" width="56" height="56" alt=""></p>
 
+[![npm](https://img.shields.io/npm/v/@huloglobal/vendure-plugin-checkout-guard?label=npm)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) [![downloads](https://img.shields.io/npm/dm/@huloglobal/vendure-plugin-checkout-guard)](https://www.npmjs.com/package/@huloglobal/vendure-plugin-checkout-guard) ![Vendure](https://img.shields.io/badge/Vendure-3.5%20%E2%80%93%203.7-17b) ![databases](https://img.shields.io/badge/MySQL%20%7C%20MariaDB%20%7C%20PostgreSQL-ok-green) [![licence](https://img.shields.io/badge/licence-AGPL--3.0%20%2B%20commercial-blue)](https://huloglobal.com/vendure-plugins/checkout-guard/)
+
 The safety layer around Vendure checkout and payments. Vendure's Stripe
 integration settles a payment when the intent succeeds — and nothing else.
 Put a manual-capture hold on a large order and the customer sees a
@@ -11,6 +13,18 @@ no reconciliation. A card declines and no one ever knows. Checkout Guard
 closes those gaps server-side and shows you all of it in one admin page.
 
 **Plugin page & pricing:** https://huloglobal.com/vendure-plugins/checkout-guard/
+
+## Quick start
+
+```bash
+yarn add @huloglobal/vendure-plugin-checkout-guard   # or npm install / pnpm add
+```
+
+1. Register `CheckoutGuardPlugin.init({ publicBaseUrl })` in `vendure-config.ts` (full options under [Install](#install)).
+2. Add `CheckoutGuardPlugin.uiExtensions` to your `compileUiExtensions` call and rebuild the admin UI.
+3. Restart Vendure. The tables are created on first boot; there is no migration to run.
+4. Open *Sales → Checkout guard* and click **Start 14-day free trial** to switch the premium guards on, or stay on the free tier (see [Tiers](#tiers)).
+
 
 ## What it does
 
@@ -148,6 +162,14 @@ to both to email the customer. Mark money received from the dashboard.
 | POST | `/checkout-guard/reconcile/run` | Admin |
 | GET | `/checkout-guard/meta` · `/settings` | Admin |
 | POST | `/checkout-guard/licence/activate` · `/deactivate` · `/purchase-link` · `/portal-link`, GET `/licence/claim-status` | Admin |
+
+## Compatibility
+
+Vendure `>=3.5.0 <4.0.0` (tested on 3.5, 3.6 and 3.7). MySQL, MariaDB and
+PostgreSQL. Node 20 LTS or newer. Stripe features need
+`@vendure/payments-plugin` Stripe configured with manual capture. REST routes
+live under `/checkout-guard`; see [Endpoints](#endpoints).
+
 
 ## Tiers
 

@@ -8,6 +8,9 @@ export const PLUGIN_ID = 'vendure-plugin-checkout-guard';
  * Licence persistence + buy-from-admin auto-install for the plugin. The
  * feature modules never touch this; it exists so the licence controller
  * has a home for the stored key and the purchase-claim client.
+ *
+ * @docsCategory Services
+ * @category Services
  */
 @Injectable()
 export class CheckoutGuardService {

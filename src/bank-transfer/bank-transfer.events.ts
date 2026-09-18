@@ -8,6 +8,9 @@ import { Order, Payment, RequestContext, VendureEvent } from '@vendure/core';
  * ```ts
  * eventBus.ofType(BankTransferExpiredEvent).subscribe(e => ...)
  * ```
+ *
+ * @docsCategory Events
+ * @category Events
  */
 export class BankTransferExpiredEvent extends VendureEvent {
     constructor(
@@ -26,6 +29,9 @@ export class BankTransferExpiredEvent extends VendureEvent {
  * without funds arriving and the transfer has not yet expired. The plugin
  * sends nothing itself — hosts subscribe and send the reminder email with the
  * details in `payment.metadata.public`.
+ *
+ * @docsCategory Events
+ * @category Events
  */
 export class BankTransferReminderEvent extends VendureEvent {
     constructor(

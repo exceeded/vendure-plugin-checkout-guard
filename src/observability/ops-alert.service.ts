@@ -11,6 +11,9 @@ import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
  *
  * SMTP env (same names as the fraud-prevention plugin):
  *   SMTP_SERVER, SMTP_PORT (587), SMTP_USER, SMTP_PASSWORD, SMTP_FROM
+ *
+ * @docsCategory Services
+ * @category Services
  */
 @Injectable()
 export class OpsAlertService {

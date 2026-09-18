@@ -53,6 +53,9 @@ export function isPaymentEventKind(v: unknown): v is PaymentEventKind {
  * Both tables are plain SQL through the licence-sdk dialect adapter, so
  * the fraud-prevention plugin (0.19+) can read
  * `checkout_guard_payment_event` directly for its failed-payments signal.
+ *
+ * @docsCategory Services
+ * @category Services
  */
 @Injectable()
 export class ObservabilityService implements OnModuleInit {

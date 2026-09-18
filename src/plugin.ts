@@ -79,6 +79,9 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
  *   • Failed-payment / orphan / amount-drift log, nightly Stripe reconciliation,
  *     checkout funnel events and ops alerts
  *   • An admin dashboard for all of it
+ *
+ * @docsCategory Plugin
+ * @category Plugin
  */
 @VendurePlugin({
     imports: [PluginCommonModule],
@@ -90,7 +93,7 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
         SessionHashSubscriber,
         ObservabilityService, OpsAlertService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber,
     ],
-    compatibility: '^3.0.0',
+    compatibility: '>=3.5.0 <4.0.0',
     configuration: (config: RuntimeVendureConfig) => {
         const options = getOptions();
         // Payment handlers + eligibility checker (idempotent: never push twice).

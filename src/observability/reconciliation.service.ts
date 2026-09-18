@@ -50,6 +50,9 @@ const MAX_LOOKBACK_DAYS = 30;
  * transition error, an outage) becomes an `orphan` payment event and one
  * ops alert per run. Rows are de-duplicated by PaymentIntent id, so a
  * still-orphaned intent is reported once, not daily.
+ *
+ * @docsCategory Services
+ * @category Services
  */
 @Injectable()
 export class ReconciliationService {

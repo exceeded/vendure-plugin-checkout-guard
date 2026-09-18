@@ -55,6 +55,9 @@ export interface SafetyCaptureReport {
  * Everything the hold module does with orders: turns Stripe webhook
  * events into Authorized payments, lists/captures/cancels holds for the
  * admin, and runs the safety capture that the cron calls.
+ *
+ * @docsCategory Services
+ * @category Services
  */
 @Injectable()
 export class StripeHoldService {

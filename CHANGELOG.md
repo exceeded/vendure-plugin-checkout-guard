@@ -5,6 +5,12 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-09-18
+
+### Changed
+- **Vendure plugin directory readiness.** The plugin class, every service and the bank-transfer events carry `@category` JSDoc tags (Plugin / Services / Events); the runtime `compatibility` declaration now matches the tested range `>=3.5.0 <4.0.0` instead of `^3.0.0`.
+- **README:** npm, download, Vendure and database badges, a four-step *Quick start* at the top (including the admin-UI compile step) and a *Compatibility* section. No functional changes.
+
 ## [0.1.1] — 2026-09-11
 
 ### Fixed
