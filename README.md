@@ -57,7 +57,11 @@ export const config: VendureConfig = {
             stripe: { webhookSecret: process.env.STRIPE_CG_WEBHOOK_SECRET, safetyCaptureDays: 6 },
             bankTransfer: { expiryDays: 7, reminderAfterDays: 3 },
             reconciliation: { enabled: true, lookbackDays: 3 },
-            trustedClientIp: { secret: process.env.CHECKOUT_GUARD_PROXY_SECRET },
+            trustedClientIp: {
+                secret: process.env.CHECKOUT_GUARD_PROXY_SECRET,
+                // Reverse proxies / load balancers in front of the API (plain IPs or CIDRs).
+                trustedProxies: ['10.0.0.0/8'],
+            },
             ops: { slackWebhookUrl: process.env.OPS_SLACK_WEBHOOK_URL, adminEmail: 'ops@example.com' },
         }),
     ],
@@ -93,9 +97,15 @@ PostgreSQL via the licence SDK's dialect adapter).
 
 When the customer confirms, Stripe emits `amount_capturable_updated`; the
 plugin verifies the signature (raw body, never a fallback), resolves the
-channel from the intent's Vendure metadata, moves the order to
-`ArrangingPayment` if needed and adds an **Authorized** payment. The order
-is placed. Capture it from *Checkout Guard → Holds* (settles the payment)
+channel from the intent's Vendure metadata, retrieves the **live**
+PaymentIntent from Stripe (events are retried for days and can describe a
+state the intent has long left), moves the order to `ArrangingPayment` if
+needed and adds an **Authorized** payment. An intent that is already
+`succeeded` (captured in the Stripe dashboard before the event arrived) is
+recorded and settled straight away; one that is `canceled` is logged as a
+`hold_expired` payment event and no payment is added. The order is placed.
+Holds below `autoCaptureBelowMinor` are captured right after the recording
+transaction commits — never while the order row is locked. Capture it from *Checkout Guard → Holds* (settles the payment)
 or from the order page; cancel releases the hold. The safety cron captures
 any hold older than `safetyCaptureDays` (default 6) and alerts you.
 Storefronts should treat `PaymentAuthorized` as "payment authorised, under
@@ -126,7 +136,26 @@ to both to email the customer. Mark money received from the dashboard.
   real IP in `x-real-client-ip` and proves itself with
   `x-checkout-guard-proxy: <secret>`. Without the secret the header is
   stripped, so nothing downstream (fraud scoring, logs) can be spoofed by a
-  browser. Use `getClientIp(req)` in your own code.
+  browser. That path always wins. For everything else `getClientIp(req, opts)`
+  resolves the address in this order:
+  1. the verified `x-real-client-ip`;
+  2. `cf-connecting-ip`, when `trustCloudflareHeader` is on;
+  3. `x-forwarded-for`, **only** when `trustedProxies` is set and the TCP
+     peer (`req.socket.remoteAddress`) is in it — the value is the
+     right-most entry that is not itself a trusted proxy (the address the
+     nearest trusted hop appended), so a browser cannot inject one;
+  4. `req.ip` (Express applies your own `apiOptions.trustProxy` setting);
+  5. the socket address.
+
+  `trustedClientIp.trustedProxies` takes IPv4/IPv6 addresses or CIDRs
+  (`['10.0.0.0/8', '173.245.48.0/20', '2400:cb00::/32']`); an invalid entry
+  fails at boot. `trustCloudflareHeader` defaults to `true` only when
+  `trustedProxies` is set (put Cloudflare's ranges in the list — the header
+  is then only read from a trusted peer); otherwise it defaults to `false`,
+  because an origin reachable without Cloudflare can be sent any value.
+  Without `trustedProxies`, `x-forwarded-for` is never consulted: set
+  `trustedProxies` or Express `trustProxy` so per-client rate limits still
+  see individual clients behind your proxy.
 - **Rate limits.** Defaults: `applyCouponCode` 10/min, `addPaymentToOrder`
   6/min, `createStripePaymentIntent` 6/min, `transitionOrderToState` 20/min
   per client IP; override with `rateLimits.mutations`. Limited requests get

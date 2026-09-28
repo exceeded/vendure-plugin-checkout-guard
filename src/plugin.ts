@@ -112,7 +112,7 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
             stripeHoldRawBodyMiddlewareRegistration,
             trustedClientIpMiddleware(options.trustedClientIp),
             shopApiMutationRateLimitMiddleware(
-                { limits: options.rateLimits?.mutations, clientIpHeader: options.trustedClientIp?.header },
+                { limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp },
                 config.apiOptions.shopApiPath,
             ),
         ];

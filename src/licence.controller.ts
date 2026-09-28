@@ -71,6 +71,8 @@ export class CheckoutGuardLicenceController {
                 header: ip.header || DEFAULT_TRUSTED_CLIENT_IP_HEADER,
                 secretHeader: ip.secretHeader || DEFAULT_TRUSTED_CLIENT_IP_SECRET_HEADER,
                 secretConfigured: !!(ip.secret || '').trim(),
+                trustedProxies: ip.trustedProxies || [],
+                trustCloudflareHeader: ip.trustCloudflareHeader ?? (ip.trustedProxies || []).length > 0,
             },
             rateLimits: resolveMutationRateLimits(o.rateLimits?.mutations),
             rateLimitDefaults: DEFAULT_MUTATION_RATE_LIMITS,

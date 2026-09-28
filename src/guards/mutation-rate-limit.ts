@@ -2,7 +2,7 @@ import { RateLimiter } from '@huloglobal/vendure-licence-sdk';
 import { Logger } from '@vendure/core';
 import type { Middleware } from '@vendure/core';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { getClientIp } from './client-ip';
+import { ClientIpResolveOptions, getClientIp } from './client-ip';
 import { GUARDS_LOGGER_CTX } from './constants';
 
 export interface MutationRateLimit {
@@ -118,8 +118,10 @@ export function extractMutationNames(body: unknown, known: Iterable<string>): st
 export interface MutationRateLimitHandlerOptions {
     /** Host overrides for `DEFAULT_MUTATION_RATE_LIMITS`. */
     limits?: MutationRateLimitOverrides;
-    /** Name of the trusted client-IP header (see `TrustedClientIpOptions.header`). */
+    /** Name of the trusted client-IP header (see `TrustedClientIpOptions.header`). Superseded by `clientIp.header`. */
     clientIpHeader?: string;
+    /** How the client IP is resolved (trusted header, proxies, Cloudflare) — pass `options.trustedClientIp`. */
+    clientIp?: ClientIpResolveOptions;
     /** Custom bucket key; return `null` to skip limiting for that request. Default: client IP. */
     keyFor?: (req: Request) => string | null;
     /** Upper bound on tracked keys per mutation (LRU). Default 10 000. */
@@ -149,7 +151,8 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         });
     }
     const names = Array.from(limiters.keys());
-    const keyFor = opts.keyFor || ((req: Request) => rateLimitBucket(getClientIp(req, { header: opts.clientIpHeader })));
+    const ipOpts: ClientIpResolveOptions = { ...(opts.clientIp || {}), header: opts.clientIp?.header || opts.clientIpHeader };
+    const keyFor = opts.keyFor || ((req: Request) => rateLimitBucket(getClientIp(req, ipOpts)));
     const onLimited = opts.onLimited || (({ mutation, key, limit }) => {
         Logger.warn(`Rate limit hit: ${mutation} from ${key} (${limit.capacity}/${Math.round(limit.windowMs / 1000)}s)`, GUARDS_LOGGER_CTX);
     });

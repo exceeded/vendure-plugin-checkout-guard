@@ -7,7 +7,7 @@
  * registerCheckoutGuardCustomFields(config);
  * config.apiOptions.middleware.push(
  *     trustedClientIpMiddleware(options.trustedClientIp),
- *     shopApiMutationRateLimitMiddleware({ limits: options.rateLimits?.mutations, clientIpHeader: options.trustedClientIp?.header }, config.apiOptions.shopApiPath),
+ *     shopApiMutationRateLimitMiddleware({ limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp }, config.apiOptions.shopApiPath),
  * );
  * ```
  * plus `SessionHashSubscriber` in the plugin's `providers`, and in the host:
@@ -35,13 +35,17 @@ export {
     DEFAULT_TRUSTED_CLIENT_IP_SECRET_HEADER,
     TRUSTED_CLIENT_IP_ENV,
     TRUSTED_PROXY_REQUEST_FLAG,
+    clientIpFromForwardedFor,
     createTrustedClientIpHandler,
     getClientIp,
+    ipToBigInt,
+    isTrustedProxy,
     normaliseIp,
+    parseCidr,
     resolveTrustedClientIpOptions,
     trustedClientIpMiddleware,
 } from './client-ip';
-export type { ClientIpSource, ResolvedTrustedClientIpOptions, TrustedClientIpOptions } from './client-ip';
+export type { ClientIpResolveOptions, ClientIpSource, ResolvedTrustedClientIpOptions, TrustedClientIpOptions } from './client-ip';
 export {
     DEFAULT_MUTATION_RATE_LIMITS,
     createMutationRateLimitHandler,

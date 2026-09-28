@@ -43,9 +43,11 @@ export class ObservabilityController {
     ) {}
 
     /** Trusted proxy header (already stripped by the guards middleware
-     *  unless the proxy secret matched) → cf-connecting-ip → x-forwarded-for → socket. */
+     *  unless the proxy secret matched) → cf-connecting-ip / x-forwarded-for
+     *  from a trusted proxy → req.ip → socket (see `getClientIp`). */
     private ipOf(req: Request): string {
-        return getClientIp(req, { header: runtimeOptions().trustedClientIp?.header }) || '';
+        const o = runtimeOptions().trustedClientIp || {};
+        return getClientIp(req, { header: o.header, trustedProxies: o.trustedProxies, trustCloudflareHeader: o.trustCloudflareHeader }) || '';
     }
 
     // ── Public: storefront-side card decline ─────────────────────────

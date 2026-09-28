@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
+import { Subscription } from 'rxjs';
 import { NotificationService, ModalService } from '@vendure/admin-ui/core';
 
 /** REST prefix shared with the plugin controllers. */
@@ -877,6 +878,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         header: 'x-real-client-ip',
         secretHeader: 'x-checkout-guard-proxy',
         secret: process.env.CHECKOUT_GUARD_PROXY_SECRET,
+        trustedProxies: ['10.0.0.0/8'],   // proxies allowed to set x-forwarded-for / cf-connecting-ip
     },
     rateLimits: { mutations: { applyCouponCode: { capacity: 10, windowMs: 60000 } } },
     ops: { slackWebhookUrl: process.env.OPS_SLACK_WEBHOOK, adminEmail: 'ops@example.com' },
@@ -885,6 +887,9 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
 
     /** `<scope>:<paymentId>` of the row whose action is in flight. */
     busyKey = '';
+
+    /** Every HTTP/modal subscription, torn down on destroy so a late response never touches a dead view. */
+    private readonly subs = new Subscription();
 
     constructor(
         private http: HttpClient,
@@ -898,12 +903,15 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         this.reloadAll();
     }
 
-    ngOnDestroy() { this.stopClaimPoll(); }
+    ngOnDestroy() { this.stopClaimPoll(); this.subs.unsubscribe(); }
 
     // ── Loading ──────────────────────────────────────────────────────
 
     reloadAll() {
         this.loading = true;
+        // Settings only change with a server restart: cached after the first
+        // load, and only this button (or a re-open) fetches them again.
+        this.settings = null;
         this.loadMeta();
         this.loadSummary();
         this.loadRecentEvents();
@@ -925,66 +933,67 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     }
 
     private loadMeta() {
-        this.http.get<any>(`${API}/meta`).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/meta`).subscribe({
             next: m => { this.meta = m; this.premiumLocked = !!m && m.tier === 'free'; this.cdr.markForCheck(); },
             error: () => undefined,
-        });
+        }));
     }
 
     loadSummary() {
-        this.http.get<any>(`${API}/summary`).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/summary`).subscribe({
             next: s => { this.summary = s || {}; this.loading = false; this.cdr.markForCheck(); },
             error: e => { this.loading = false; this.notification.error(this.errMsg(e, 'Could not load the summary')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     private loadRecentEvents() {
-        this.http.get<any>(`${API}/events`, { params: { days: '7', limit: '8' } }).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/events`, { params: { days: '7', limit: '8' } }).subscribe({
             next: r => { this.recentEvents = this.asList<EventRow>(r, 'events', 'items').slice(0, 8); this.cdr.markForCheck(); },
             error: () => undefined,
-        });
+        }));
     }
 
     loadHolds() {
         this.holdsLoading = true;
-        this.http.get<any>(`${API}/holds`).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/holds`).subscribe({
             next: r => { this.holds = this.asList<HoldRow>(r, 'items', 'holds').map((h: any) => ({ ...h, currency: h.currency ?? h.currencyCode, transactionId: h.transactionId ?? h.paymentIntentId })); this.holdsLoading = false; this.cdr.markForCheck(); },
             error: e => { this.holdsLoading = false; this.notification.error(this.errMsg(e, 'Could not load holds')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     setBankStatus(s: BankStatus) { this.bankStatus = s; this.loadBank(); }
 
     loadBank() {
         this.bankLoading = true;
-        this.http.get<any>(`${API}/bank-transfers`, { params: { status: this.bankStatus } }).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/bank-transfers`, { params: { status: this.bankStatus } }).subscribe({
             next: r => { this.bank = this.asList<BankRow>(r, 'rows', 'transfers', 'bankTransfers', 'items').map((b: any) => ({ ...b, amount: b.amount ?? b.amountMinor, reference: b.reference ?? b.orderCode, state: b.state ?? b.paymentState })); this.bankLoading = false; this.cdr.markForCheck(); },
             error: e => { this.bankLoading = false; this.notification.error(this.errMsg(e, 'Could not load bank transfers')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     loadEvents() {
         this.eventsLoading = true;
         const params: Record<string, string> = { days: String(this.eventDays) };
         if (this.eventKind) params.kind = this.eventKind;
-        this.http.get<any>(`${API}/events`, { params }).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/events`, { params }).subscribe({
             next: r => { this.events = this.asList<EventRow>(r, 'events', 'items'); this.eventsLoading = false; this.cdr.markForCheck(); },
             error: e => { this.eventsLoading = false; this.notification.error(this.errMsg(e, 'Could not load payment events')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     loadFunnel() {
         this.funnelLoading = true;
-        this.http.get<any>(`${API}/funnel/summary`, { params: { days: String(this.funnelDays) } }).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/funnel/summary`, { params: { days: String(this.funnelDays) } }).subscribe({
             next: r => { this.funnel = this.normaliseFunnel(r); this.funnelLoading = false; this.cdr.markForCheck(); },
             error: e => { this.funnelLoading = false; this.notification.error(this.errMsg(e, 'Could not load the funnel')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     loadSettings() {
+        if (this.settings && !this.settingsError) { this.cdr.markForCheck(); return; }
         this.settingsLoading = true;
         this.settingsError = '';
-        this.http.get<any>(`${API}/settings`).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/settings`).subscribe({
             next: s => { this.settings = s || {}; this.settingsSections = this.buildSettingsSections(this.settings); this.settingsLoading = false; this.cdr.markForCheck(); },
             error: e => {
                 this.settingsLoading = false;
@@ -995,7 +1004,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                     : this.errMsg(e, 'Could not load the settings');
                 this.cdr.markForCheck();
             },
-        });
+        }));
     }
 
     // ── Actions ──────────────────────────────────────────────────────
@@ -1024,7 +1033,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         if (this.busyKey) return;
         this.busyKey = busyKey;
         this.cdr.markForCheck();
-        this.http.post<any>(url, {}).subscribe({
+        this.subs.add(this.http.post<any>(url, {}).subscribe({
             next: r => {
                 this.busyKey = '';
                 if (r && r.ok === false) this.notification.error(r.message || 'The action was refused');
@@ -1033,19 +1042,19 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.cdr.markForCheck();
             },
             error: e => { this.busyKey = ''; this.notification.error(this.errMsg(e, 'The action failed')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     private confirm(title: string, body: string, okLabel: string, style: 'primary' | 'danger'): Promise<boolean> {
         return new Promise(resolve => {
-            this.modal.dialog<boolean>({
+            this.subs.add(this.modal.dialog<boolean>({
                 title,
                 body,
                 buttons: [
                     { type: 'secondary', label: 'Back' },
                     { type: style, label: okLabel, returnValue: true },
                 ],
-            }).subscribe({ next: v => resolve(!!v), error: () => resolve(false) });
+            }).subscribe({ next: v => resolve(!!v), error: () => resolve(false) }));
         });
     }
 
@@ -1061,7 +1070,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
 
     buyLicence() {
         this.buying = true;
-        this.http.post<any>(`${API}/licence/purchase-link`, { plan: this.buyPlan }).subscribe({
+        this.subs.add(this.http.post<any>(`${API}/licence/purchase-link`, { plan: this.buyPlan }).subscribe({
             next: r => {
                 this.buying = false;
                 if (r?.url) {
@@ -1072,13 +1081,13 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.cdr.markForCheck();
             },
             error: e => { this.buying = false; this.notification.error(this.errMsg(e, 'Could not start checkout — try again shortly')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     buyLifetime() { this.buyPlan = 'lifetime'; this.buyLicence(); }
 
     checkClaim(force = false) {
-        this.http.get<any>(`${API}/licence/claim-status` + (force ? '?check=1' : '')).subscribe({
+        this.subs.add(this.http.get<any>(`${API}/licence/claim-status` + (force ? '?check=1' : '')).subscribe({
             next: r => {
                 const wasPending = this.claim?.state === 'pending';
                 this.claim = r;
@@ -1091,7 +1100,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.cdr.markForCheck();
             },
             error: () => undefined,
-        });
+        }));
     }
 
     private startClaimPoll() { this.stopClaimPoll(); this.claimTimer = setInterval(() => this.checkClaim(false), 15000); }
@@ -1111,17 +1120,17 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
 
     openPortal() {
         this.portalOpening = true;
-        this.http.post<any>(`${API}/licence/portal-link`, {}).subscribe({
+        this.subs.add(this.http.post<any>(`${API}/licence/portal-link`, {}).subscribe({
             next: r => { this.portalOpening = false; if (r?.url) window.open(r.url, '_blank', 'noopener'); this.cdr.markForCheck(); },
             error: e => { this.portalOpening = false; this.notification.error(this.errMsg(e, 'Could not open the billing portal')); this.cdr.markForCheck(); },
-        });
+        }));
     }
 
     activateLicence() {
         const key = (this.licenceKeyInput || '').trim();
         if (!key) return;
         this.activating = true;
-        this.http.post<any>(`${API}/licence/activate`, { key }).subscribe({
+        this.subs.add(this.http.post<any>(`${API}/licence/activate`, { key }).subscribe({
             next: r => {
                 this.activating = false;
                 this.licenceKeyInput = '';
@@ -1134,7 +1143,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                 this.notification.error(this.errMsg(e, 'That key did not validate — check it was copied completely'));
                 this.cdr.markForCheck();
             },
-        });
+        }));
     }
 
     updateAvailable(): boolean {

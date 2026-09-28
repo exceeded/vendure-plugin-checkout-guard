@@ -5,6 +5,58 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-09-28
+
+Follow-up to the 0.1.3 audit. No schema changes; nothing to migrate.
+
+### Changed
+- **Client-IP trust model.** `trustedClientIp.trustedProxies` (IPv4/IPv6
+  addresses or CIDRs) names the proxies in front of the API.
+  `x-forwarded-for` is now only consulted when the TCP peer is one of them,
+  and the client address is the right-most entry that is not itself a
+  trusted proxy — a browser can no longer inject an address into the rate
+  limiter, funnel or decline log. Without `trustedProxies` the header is
+  ignored and `req.ip` (your `apiOptions.trustProxy` setting) or the socket
+  is used. `trustCloudflareHeader` now defaults to `false` unless
+  `trustedProxies` is set or it is enabled explicitly; with `trustedProxies`
+  it is only read from a trusted peer. The secret-header path
+  (`x-real-client-ip` + `x-checkout-guard-proxy`) is unchanged and still
+  wins. Invalid `trustedProxies` entries fail at boot. The effective values
+  are shown in the Settings tab. **Hosts that relied on the first
+  `x-forwarded-for` entry without `trustProxy` should set `trustedProxies`.**
+- **Auto-capture off the row lock.** A below-threshold hold is now captured
+  after the recording transaction commits (same result, same alerts); the
+  Stripe capture call no longer runs while `SELECT … FOR UPDATE` is held on
+  the order row. If the capture fails the hold stays Authorized and a
+  `hold.capture_failed` alert is raised instead of rolling the hold back.
+- **Live intent check before recording a hold.** Before
+  `amount_capturable_updated` adds a payment, the PaymentIntent is retrieved
+  from Stripe (outside the transaction). `requires_capture` proceeds as
+  before; `succeeded` is recorded and settled immediately (captured in the
+  dashboard before the event was delivered); `canceled` is logged as a
+  `hold_expired` payment event with a `hold.expired` alert and no payment is
+  added; any other status is ignored. A redelivered event is de-duplicated
+  before the Stripe call. When the channel has no Stripe key or Stripe is
+  unreachable the signed event payload is used as before.
+- **Admin UI.** Effective settings are cached after the first load (only
+  Refresh re-fetches them) and every HTTP/modal subscription is torn down
+  when the page is left.
+
+### Added
+- Unit tests for `StripeHoldService` (webhook flow, dedupe, channel/order
+  errors, transition failure, premium lock, capture/cancel state mapping,
+  safety capture), `BankTransferService` (channel-scoped listing, mark
+  received / cancel incl. stale-under-lock, sweep expire + remind, stranded
+  repair) and `ReconciliationService.runOnce` (orphan rows, second-run
+  dedupe, single alert, persisted last run) on lightweight fakes — no
+  database.
+- Postgres corpus test (`src/__tests__/pg-corpus.test.ts`, runs when
+  `HULO_PG_URL` is set): extracts every SQL template literal, translates it
+  through the dialect adapter and executes it against PostgreSQL 17 with
+  quoted-camelCase stand-ins for the Vendure tables. 37/37 statements pass.
+- `parseCidr`, `isTrustedProxy`, `clientIpFromForwardedFor`, `ipToBigInt`
+  are exported for hosts that want the same matcher.
+
 ## [0.1.3] — 2026-09-28
 
 Reliability and performance pass — no new features. One small table

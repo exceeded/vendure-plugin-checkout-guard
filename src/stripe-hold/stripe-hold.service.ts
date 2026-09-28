@@ -8,8 +8,8 @@ import {
     computeHoldUntil, formatMinor, fromStripeMinorUnits, holdUntilFromMetadata, isPaymentIntentId, parseVendureMetadata,
 } from './hold-utils';
 import { effectiveStripeHoldOptions, getStripeHoldRuntime, notifyOpsSafe, recordPaymentEventSafe, StripeHoldOpsEvent } from './runtime';
-import type { StripePaymentIntentLike } from './stripe-api';
-import { getHoldMethodCodes, getHoldPaymentMethodForChannel } from './stripe-key';
+import { retrievePaymentIntent, type StripePaymentIntentLike } from './stripe-api';
+import { getHoldMethodCodes, getHoldPaymentMethodForChannel, getStripeKeyForChannelId } from './stripe-key';
 
 const loggerCtx = 'CheckoutGuard:StripeHold';
 
@@ -176,9 +176,43 @@ export class StripeHoldService {
             await notifyOpsSafe({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id} for order ${orderCode}: unknown channel token`, orderCode, paymentIntentId: pi.id });
             return { status: 200, message: 'Unknown channel token' };
         }
+        // Cheap dedupe before any Stripe round trip: redeliveries of an
+        // already-recorded event are the common case. The in-transaction
+        // check below still catches two deliveries racing each other.
+        const known = await this.connection.rawConnection.getRepository(Payment).findOne({ where: { transactionId: pi.id } as any });
+        if (known) {
+            return { status: 200, message: `Hold ${pi.id} already recorded as payment ${known.id} (${known.state})` };
+        }
+        // Stripe retries for days, so the event can describe a state the
+        // intent has long left. Ask Stripe for the live intent BEFORE the
+        // transaction: a 15 s API call must never sit on the order row lock.
+        const live = await this.liveIntent(channel.id, pi);
+        let settleAfterCommit: 'auto' | 'captured' | null = null;
+        if (live.status === 'succeeded') {
+            // Captured at Stripe (dashboard, an earlier retry) before we recorded
+            // the hold: record it and settle it straight away — the money is taken.
+            settleAfterCommit = 'captured';
+        } else if (live.status === 'canceled') {
+            const msg = `PaymentIntent ${pi.id} for order ${orderCode} was cancelled at Stripe (${String((live as any).cancellation_reason || 'no reason')}) before the hold was recorded — no payment added`;
+            Logger.warn(msg, loggerCtx);
+            await recordPaymentEventSafe({
+                kind: 'hold_expired', provider: 'stripe', providerRef: pi.id, orderCode, orderId, channelId: channel.id,
+                amountMinor: Number.isFinite(Number(pi.amount)) ? fromStripeMinorUnits(Number(pi.amount), pi.currency) : undefined,
+                currency: pi.currency ? pi.currency.toUpperCase() : undefined, message: msg,
+            });
+            await notifyOpsSafe({ event: 'hold.expired', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
+            return { status: 200, message: `PaymentIntent ${pi.id} is canceled at Stripe, no hold created` };
+        } else if (live.status !== 'requires_capture') {
+            return { status: 200, message: `PaymentIntent ${pi.id} is ${live.status} at Stripe, nothing to hold` };
+        }
+        const capturable = settleAfterCommit === 'captured'
+            ? (Number(live.amount_received) > 0 ? Number(live.amount_received) : Number(pi.amount_capturable))
+            : Number(live.amount_capturable);
         const outerCtx = await this.createContext(channel.token, languageCode, req);
+        let pending: { paymentId: ID; held: number; currency: string; reason: 'auto' | 'captured' } | null = null;
+        let outcome: WebhookOutcome;
         try {
-            const outcome = await this.connection.withTransaction(outerCtx, async ctx => {
+            outcome = await this.connection.withTransaction(outerCtx, async ctx => {
                 const order = await this.orderService.findOneByCode(ctx, orderCode, ['payments', 'channels']);
                 if (!order) {
                     Logger.error(`Order ${orderCode} not found for hold ${pi.id}`, loggerCtx);
@@ -214,9 +248,9 @@ export class StripeHoldService {
                     method: method.code,
                     metadata: {
                         paymentIntentId: pi.id,
-                        amountCapturable: pi.amount_capturable,
-                        stripeStatus: pi.status,
-                        latestCharge: typeof pi.latest_charge === 'string' ? pi.latest_charge : pi.latest_charge?.id,
+                        amountCapturable: capturable,
+                        stripeStatus: live.status,
+                        latestCharge: typeof live.latest_charge === 'string' ? live.latest_charge : live.latest_charge?.id,
                     },
                 });
                 if (!(result instanceof Order)) {
@@ -226,32 +260,29 @@ export class StripeHoldService {
                     return { status: 200, message: 'addPaymentToOrder failed' };
                 }
                 const payment = (result.payments || []).find(p => p.transactionId === pi.id);
-                const held = fromStripeMinorUnits(Number(pi.amount_capturable), result.currencyCode);
+                const held = fromStripeMinorUnits(capturable, result.currencyCode);
                 Logger.info(`Hold ${pi.id} recorded on order ${orderCode} as Authorized (${formatMinor(held, result.currencyCode)})`, loggerCtx);
-                deferred.push({
-                    event: 'hold.authorized', orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code,
-                    text: `Card hold authorised for order ${orderCode}: ${formatMinor(held, result.currencyCode)} (${pi.id}) — capture within ${effectiveStripeHoldOptions().safetyCaptureDays} days`,
-                });
+                if (settleAfterCommit !== 'captured') {
+                    deferred.push({
+                        event: 'hold.authorized', orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code,
+                        text: `Card hold authorised for order ${orderCode}: ${formatMinor(held, result.currencyCode)} (${pi.id}) — capture within ${effectiveStripeHoldOptions().safetyCaptureDays} days`,
+                    });
+                }
                 if (held !== result.totalWithTax) {
                     const msg = `Hold ${pi.id} amount ${formatMinor(held, result.currencyCode)} differs from order ${orderCode} total ${formatMinor(result.totalWithTax, result.currencyCode)}`;
                     Logger.warn(msg, loggerCtx);
                     deferred.push({ event: 'hold.amount_mismatch', text: msg, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
                 }
                 const { autoCaptureBelowMinor } = effectiveStripeHoldOptions();
-                if (payment && Number.isFinite(Number(autoCaptureBelowMinor)) && held < Number(autoCaptureBelowMinor)) {
-                    const settled = await this.orderService.settlePayment(ctx, payment.id);
-                    if (isGraphQlErrorResult(settled)) {
-                        Logger.warn(`Auto-capture of ${pi.id} (${orderCode}) failed: ${settled.message}`, loggerCtx);
-                        deferred.push({ event: 'hold.capture_failed', text: `Auto-capture failed for ${orderCode}: ${settled.message}`, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
-                    } else {
-                        deferred.push({ event: 'hold.auto_captured', text: `Auto-captured ${formatMinor(held, result.currencyCode)} for order ${orderCode} (below threshold)`, orderCode, paymentIntentId: pi.id, amountMinor: held, currency: result.currencyCode, channelCode: channel.code });
-                    }
+                if (payment && settleAfterCommit === 'captured') {
+                    pending = { paymentId: payment.id, held, currency: result.currencyCode, reason: 'captured' };
+                } else if (payment && Number.isFinite(Number(autoCaptureBelowMinor)) && held < Number(autoCaptureBelowMinor)) {
+                    // Settled AFTER the commit: the Stripe capture call must not
+                    // run while this transaction holds the order row lock.
+                    pending = { paymentId: payment.id, held, currency: result.currencyCode, reason: 'auto' };
                 }
                 return { status: 200, message: `Hold ${pi.id} recorded on order ${orderCode}` };
             });
-            // Ops notifications must never hold Stripe's webhook response.
-            void flush();
-            return outcome;
         } catch (e: any) {
             void flush();
             const msg = `Unhandled error recording hold ${pi.id} for ${orderCode}: ${e?.message || e}`;
@@ -259,6 +290,54 @@ export class StripeHoldService {
             await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
             // 5xx: Stripe retries, so a transient DB error never loses the hold.
             return { status: 500, message: 'Internal error — retry' };
+        }
+        if (pending) {
+            const p = pending as { paymentId: ID; held: number; currency: string; reason: 'auto' | 'captured' };
+            const settleCtx = await this.createContext(channel.token, languageCode, req);
+            const settled = await this.settleRecordedHold(settleCtx, p.paymentId);
+            const what = p.reason === 'auto' ? 'Auto-capture' : 'Settle of externally captured hold';
+            if (!settled.ok) {
+                Logger.warn(`${what} of ${pi.id} (${orderCode}) failed: ${settled.error}`, loggerCtx);
+                deferred.push({ event: 'hold.capture_failed', text: `${what} failed for ${orderCode}: ${settled.error}`, orderCode, paymentIntentId: pi.id, amountMinor: p.held, currency: p.currency, channelCode: channel.code });
+            } else if (p.reason === 'auto') {
+                deferred.push({ event: 'hold.auto_captured', text: `Auto-captured ${formatMinor(p.held, p.currency)} for order ${orderCode} (below threshold)`, orderCode, paymentIntentId: pi.id, amountMinor: p.held, currency: p.currency, channelCode: channel.code });
+            } else {
+                deferred.push({ event: 'hold.captured', text: `Hold ${pi.id} for order ${orderCode} was already captured at Stripe (${formatMinor(p.held, p.currency)}); recorded and settled`, orderCode, paymentIntentId: pi.id, amountMinor: p.held, currency: p.currency, channelCode: channel.code });
+            }
+        }
+        // Ops notifications must never hold Stripe's webhook response.
+        void flush();
+        return outcome;
+    }
+
+    /**
+     * The intent as Stripe sees it now. Falls back to the event payload
+     * when the channel has no Stripe key or the lookup fails — the event
+     * is signed, so it is a safe (if possibly stale) description.
+     */
+    private async liveIntent(channelId: ID, pi: StripePaymentIntentLike): Promise<StripePaymentIntentLike> {
+        const apiKey = await getStripeKeyForChannelId(this.connection, channelId);
+        if (!apiKey) {
+            Logger.verbose(`No Stripe key on channel ${channelId}; recording hold ${pi.id} from the event payload`, loggerCtx);
+            return pi;
+        }
+        try {
+            const live = await retrievePaymentIntent(apiKey, pi.id, { timeoutMs: 10_000 });
+            return live && live.id === pi.id ? live : pi;
+        } catch (e: any) {
+            Logger.warn(`Could not retrieve ${pi.id} from Stripe (${e?.message || e}); recording hold from the event payload`, loggerCtx);
+            return pi;
+        }
+    }
+
+    /** Settle a just-recorded hold in its own (short) transaction. */
+    private async settleRecordedHold(ctx: RequestContext, paymentId: ID): Promise<{ ok: true; state: string } | { ok: false; error: string }> {
+        try {
+            const settled = await this.connection.withTransaction(ctx, tctx => this.orderService.settlePayment(tctx, paymentId));
+            if (isGraphQlErrorResult(settled)) return { ok: false, error: String((settled as any).paymentErrorMessage || settled.message) };
+            return { ok: true, state: settled.state };
+        } catch (e: any) {
+            return { ok: false, error: e?.message || String(e) };
         }
     }
 

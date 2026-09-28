@@ -69,7 +69,7 @@ describe('extractMutationNames', () => {
 });
 
 function makeReq(query: string, ip = '198.51.100.1', method = 'POST'): any {
-    return { method, headers: { 'cf-connecting-ip': ip }, body: { query } };
+    return { method, headers: {}, socket: { remoteAddress: ip }, body: { query } };
 }
 
 function makeRes(): any {
