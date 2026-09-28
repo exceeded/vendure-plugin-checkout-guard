@@ -97,6 +97,7 @@ export class StripeHoldController {
     @Post('holds/:paymentId/capture')
     async capture(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('paymentId') paymentId: string) {
         if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
         if (!this.service.premium()) return res.status(402).json({ error: 'premium_required' });
         const r = await this.service.capture(ctx, paymentId, 'admin');
         return res.status(r.ok ? 200 : this.statusFor(r.error)).json(r);
@@ -105,6 +106,7 @@ export class StripeHoldController {
     @Post('holds/:paymentId/cancel')
     async cancel(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('paymentId') paymentId: string) {
         if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
         if (!this.service.premium()) return res.status(402).json({ error: 'premium_required' });
         const r = await this.service.cancel(ctx, paymentId, 'admin');
         return res.status(r.ok ? 200 : this.statusFor(r.error)).json(r);

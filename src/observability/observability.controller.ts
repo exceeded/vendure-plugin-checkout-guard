@@ -111,12 +111,24 @@ export class ObservabilityController {
     }
 
     // ── Admin: payment events ────────────────────────────────────────
+    /**
+     * The channel an admin read is scoped to: an operator working in a
+     * non-default channel only sees that channel; the default channel may
+     * pick any channel with `?channelId=` or see everything.
+     */
+    private scopedChannel(ctx: RequestContext, requested: unknown): number | null {
+        const isDefault = !ctx.channelId || ctx.channel?.code === '__default_channel__' || String(ctx.channelId) === '1';
+        if (!isDefault) return Number(ctx.channelId);
+        const n = requested ? Number(requested) : NaN;
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
     /** `GET /checkout-guard/events?kind=&days=&channelId=&orderCode=&limit=` */
     @Get('events')
     async events(@Ctx() ctx: RequestContext, @Res() res: Response, @Query() q: any) {
         if (denyUnlessAdmin(ctx, res, false)) return;
         const events = await this.service.listPaymentEvents({
-            kind: q?.kind, days: q?.days, channelId: q?.channelId, orderCode: q?.orderCode, limit: q?.limit,
+            kind: q?.kind, days: q?.days, channelId: this.scopedChannel(ctx, q?.channelId) ?? undefined, orderCode: q?.orderCode, limit: q?.limit,
         });
         return res.json({ events, kinds: PAYMENT_EVENT_KINDS });
     }
@@ -125,12 +137,11 @@ export class ObservabilityController {
     @Get('summary')
     async summary(@Ctx() ctx: RequestContext, @Res() res: Response, @Query() q: any) {
         if (denyUnlessAdmin(ctx, res, false)) return;
-        const channelId = q?.channelId ? Number(q.channelId) : null;
-        const summary = await this.service.summary(Number.isFinite(channelId as number) ? channelId : null);
+        const summary = await this.service.summary(this.scopedChannel(ctx, q?.channelId));
         return res.json({
             ...summary,
             opsConfigured: this.ops.isConfigured(),
-            reconciliation: this.reconciliation.status(),
+            reconciliation: await this.reconciliation.status(),
         });
     }
 
@@ -138,8 +149,7 @@ export class ObservabilityController {
     @Get('funnel/summary')
     async funnelSummary(@Ctx() ctx: RequestContext, @Res() res: Response, @Query() q: any) {
         if (denyUnlessAdmin(ctx, res, false)) return;
-        const channelId = q?.channelId ? Number(q.channelId) : null;
-        const summary = await this.service.funnelSummary(q?.days ?? 7, Number.isFinite(channelId as number) ? channelId : null);
+        const summary = await this.service.funnelSummary(q?.days ?? 7, this.scopedChannel(ctx, q?.channelId));
         return res.json(summary);
     }
 

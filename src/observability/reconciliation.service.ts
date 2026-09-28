@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Channel, Logger, PaymentMethod, ProcessContext, TransactionalConnection } from '@vendure/core';
 import { adapterFor } from '@huloglobal/vendure-licence-sdk';
+import { withDbLock } from '../db-lock';
 import { ObservabilityService } from './observability.service';
+import { STATE_TABLE } from './schema';
 import { formatMinor, OpsAlertService } from './ops-alert.service';
 import { findOrphanIntents, listStripePaymentIntents } from './reconciliation';
 import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
@@ -72,20 +74,61 @@ export class ReconciliationService {
         return Math.min(MAX_LOOKBACK_DAYS, n);
     }
 
-    status(): ReconciliationStatus {
+    /** Status incl. the last run from ANY process (the cron runs on the worker, the dashboard on the server). */
+    async status(): Promise<ReconciliationStatus> {
+        let lastRun = this.lastRun;
+        try {
+            const rows: Array<{ v: string }> = await adapterFor(this.connection.rawConnection)
+                .query(`SELECT v FROM ${STATE_TABLE} WHERE k = ?`, ['reconcile:last']);
+            if (rows?.[0]?.v) {
+                const stored = JSON.parse(rows[0].v) as ReconciliationRunResult;
+                if (!lastRun || String(stored.startedAt) > String(lastRun.startedAt)) lastRun = stored;
+            }
+        } catch { /* table missing on first boot */ }
         return {
             enabled: runtimeOptions().reconciliation?.enabled !== false,
             premium: hasPremium(),
             lookbackDays: this.lookbackDays(),
             schedule: SCHEDULE,
-            lastRun: this.lastRun,
+            lastRun,
         };
+    }
+
+    private async persistLastRun(result: ReconciliationRunResult): Promise<void> {
+        this.lastRun = result;
+        try {
+            const db = adapterFor(this.connection.rawConnection);
+            await db.query(
+                `INSERT INTO ${STATE_TABLE} (k, v, updatedAt) VALUES (?, ?, NOW(3)) ON DUPLICATE KEY UPDATE v = VALUES(v), updatedAt = NOW(3)`,
+                ['reconcile:last', JSON.stringify(result)], { conflictColumns: ['k'] } as any,
+            );
+        } catch (e: any) {
+            Logger.debug(`Could not persist reconciliation result: ${e?.message || e}`, loggerCtx);
+        }
     }
 
     @Cron(SCHEDULE)
     async daily() {
         if (this.processContext.isServer) return; // worker only
         await this.runOnce();
+    }
+
+    /** Retention: funnel beacons after 90 days, short-lived payment events after 180, the rest after 400. Worker only. */
+    @Cron('20 3 * * *')
+    async prune() {
+        if (this.processContext.isServer) return;
+        try {
+            const locked = await withDbLock(this.connection.rawConnection, 'prune', async () => {
+                const funnel = await this.events.pruneFunnel(90);
+                const events = await this.events.prunePaymentEvents(180, 400);
+                return { funnel, events };
+            });
+            if (locked.acquired && locked.result && (locked.result.funnel || locked.result.events)) {
+                Logger.info(`Checkout Guard retention: removed ${locked.result.funnel} funnel row(s), ${locked.result.events} payment event(s)`, loggerCtx);
+            }
+        } catch (e: any) {
+            Logger.warn(`Checkout Guard retention failed: ${e?.message || e}`, loggerCtx);
+        }
     }
 
     /**
@@ -106,13 +149,16 @@ export class ReconciliationService {
         if (this.running) return skip('already_running');
         this.running = true;
         try {
-            const result = await this.reconcile(startedAt);
-            this.lastRun = result;
+            // Cross-process: the admin "Run now" (server) and the 04:10 cron (worker).
+            const locked = await withDbLock(this.connection.rawConnection, 'reconcile', () => this.reconcile(startedAt));
+            if (!locked.acquired) return skip('already_running');
+            const result = locked.result!;
+            await this.persistLastRun(result);
             return result;
         } catch (e: any) {
             Logger.error(`Stripe reconciliation failed: ${e?.message || e}`, loggerCtx);
-            const failed = { ...skip(`error: ${e?.message || e}`), ran: true, incomplete: true };
-            this.lastRun = failed;
+            const failed = { ...skip('error'), ran: true, incomplete: true };
+            await this.persistLastRun(failed);
             return failed;
         } finally {
             this.running = false;
@@ -144,8 +190,9 @@ export class ReconciliationService {
             if (incomplete) result.incomplete = true;
             const orphans = findOrphanIntents(intents, known);
             result.orphansFound += orphans.length;
+            const already = await this.events.existingPaymentEventRefs('orphan', orphans.map(o => o.paymentIntentId));
             for (const o of orphans) {
-                if (await this.events.hasPaymentEvent('orphan', o.paymentIntentId)) continue;
+                if (already.has(o.paymentIntentId)) continue;
                 const channelId = (o.channelToken && account.channelTokens.get(o.channelToken)) || account.channelIds[0];
                 const orderId = o.orderId && /^\d+$/.test(o.orderId) ? Number(o.orderId) : null;
                 const id = await this.events.recordPaymentEvent({
@@ -218,21 +265,16 @@ export class ReconciliationService {
     /** `payment.transactionId` values that look like PaymentIntents, recent enough to overlap the window. */
     private async knownTransactionIds(days: number): Promise<Set<string>> {
         const db = adapterFor(this.connection.rawConnection);
-        const rows: Array<{ transactionId: string }> = await db.query(
-            `SELECT transactionId FROM payment
-             WHERE transactionId LIKE 'pi_%' AND createdAt > DATE_SUB(NOW(), INTERVAL ? DAY)`,
+        // One pass over the window: the transaction id, and (for holds created
+        // through the webhook) the intent carried in metadata. Backticks keep
+        // Vendure's camelCase columns intact on Postgres.
+        const rows: Array<{ transactionId: string | null; metadata: any }> = await db.query(
+            `SELECT \`transactionId\`, metadata FROM payment WHERE \`createdAt\` > DATE_SUB(NOW(), INTERVAL ? DAY)`,
             [Math.max(1, Math.floor(days))],
         ).catch(() => []);
         const set = new Set<string>();
-        for (const r of rows) if (r.transactionId) set.add(String(r.transactionId));
-        // Hold payments created through the webhook also carry the intent in metadata.
-        const meta: Array<{ metadata: any }> = await db.query(
-            `SELECT metadata FROM payment
-             WHERE (transactionId IS NULL OR transactionId NOT LIKE 'pi_%')
-               AND createdAt > DATE_SUB(NOW(), INTERVAL ? DAY)`,
-            [Math.max(1, Math.floor(days))],
-        ).catch(() => []);
-        for (const r of meta) {
+        for (const r of rows) {
+            if (r.transactionId && String(r.transactionId).startsWith('pi_')) { set.add(String(r.transactionId)); continue; }
             try {
                 const m = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
                 const pi = m?.paymentIntentId || m?.public?.paymentIntentId;

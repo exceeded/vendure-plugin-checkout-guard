@@ -6,6 +6,8 @@ import { formatMinor, OpsAlertService } from './ops-alert.service';
 import { hasPremium, loggerCtx, noteLocked } from './runtime';
 
 const LIVE_STATES = new Set(['Settled', 'Authorized']);
+/** Order states in which every payment the customer will make has been made. */
+const POST_PAYMENT_ORDER_STATES = new Set(['PaymentSettled', 'PaymentAuthorized', 'PartiallyShipped', 'Shipped', 'PartiallyDelivered', 'Delivered']);
 
 /**
  * Amount-drift guard (premium). When a payment settles for an amount
@@ -42,6 +44,11 @@ export class AmountDriftSubscriber implements OnApplicationBootstrap {
         const order = await this.connection.rawConnection.getRepository(Order)
             .findOne({ where: { id: orderId }, relations: ['payments', 'channels'] });
         if (!order) return false;
+        // Multi-payment checkouts (gift card + card, ArrangingAdditionalPayment)
+        // settle their first part before the second exists: only judge an
+        // order that has moved on from collecting payment, so a partial
+        // settlement is not reported as "underpaid".
+        if (!POST_PAYMENT_ORDER_STATES.has(String(order.state))) return false;
         const others = (order.payments || [])
             .filter(p => String(p.id) !== String(payment.id) && LIVE_STATES.has(p.state))
             .map(p => Number(p.amount) || 0);

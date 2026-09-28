@@ -47,6 +47,27 @@ export function summariseFunnel(rows: FunnelRowLite[], days: number): FunnelSumm
         events.set(row.step, (events.get(row.step) || 0) + 1);
         uniques.get(row.step)!.add(funnelKey(row));
     }
+    return summariseFunnelCounts(
+        FUNNEL_STEPS.map(step => ({ step, events: events.get(step) || 0, unique: uniques.get(step)!.size })), days,
+    );
+}
+
+/** One aggregated row per step, as `GROUP BY step` returns it. */
+export interface FunnelStepCounts { step: string; events: number; unique: number; }
+
+/** The same summary from per-step counts (the database did the counting). */
+export function summariseFunnelCounts(counts: FunnelStepCounts[], days: number): FunnelSummary {
+    const events = new Map<FunnelStep, number>();
+    const uniques = new Map<FunnelStep, { size: number }>();
+    for (const step of FUNNEL_STEPS) {
+        events.set(step, 0);
+        uniques.set(step, { size: 0 });
+    }
+    for (const c of counts) {
+        if (!isFunnelStep(c.step)) continue;
+        events.set(c.step, (events.get(c.step) || 0) + (Number(c.events) || 0));
+        uniques.get(c.step)!.size += Number(c.unique) || 0;
+    }
 
     const steps: FunnelStepSummary[] = [];
     let worst: { step: FunnelStep; pct: number } | null = null;

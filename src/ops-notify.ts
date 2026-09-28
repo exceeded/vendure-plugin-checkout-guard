@@ -62,12 +62,13 @@ async function post(url: string, body: unknown, headers: Record<string, string> 
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 6000);
     try {
-        await fetch(url, {
+        const r = await fetch(url, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...headers },
             body: typeof body === 'string' ? body : JSON.stringify(body),
             signal: controller.signal,
         });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
     } finally {
         clearTimeout(t);
     }
@@ -106,7 +107,7 @@ export async function fanOutOpsEvent(channels: OpsChannels, ev: OpsEvent): Promi
     const results = await Promise.allSettled(jobs);
     for (const r of results) {
         if (r.status === 'rejected') {
-            Logger.debug(`Ops notification transport failed: ${r.reason?.message || r.reason}`, loggerCtx);
+            Logger.warn(`Ops notification transport failed: ${r.reason?.message || r.reason}`, loggerCtx);
         }
     }
 }

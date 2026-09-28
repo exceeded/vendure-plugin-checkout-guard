@@ -134,6 +134,7 @@ export class StripeHoldService {
             const now = Date.now();
             if (now - StripeHoldService.lastLockedAlertAt > 60 * 60 * 1000) {
                 StripeHoldService.lastLockedAlertAt = now;
+                Logger.error(`Stripe hold ${pi.id} for order ${meta.orderCode} NOT recorded — Checkout Guard premium is locked; answering 503 so Stripe retries`, loggerCtx);
                 await notifyOpsSafe({ event: 'hold.webhook_error', text: `Stripe hold ${pi.id} for order ${meta.orderCode} NOT recorded — Checkout Guard premium is locked (licence missing or expired). Stripe will retry; activate a licence.`, orderCode: meta.orderCode, paymentIntentId: pi.id });
             }
             return { status: 503, message: 'Checkout Guard premium locked — retry later' };
@@ -248,10 +249,11 @@ export class StripeHoldService {
                 }
                 return { status: 200, message: `Hold ${pi.id} recorded on order ${orderCode}` };
             });
-            await flush();
+            // Ops notifications must never hold Stripe's webhook response.
+            void flush();
             return outcome;
         } catch (e: any) {
-            await flush();
+            void flush();
             const msg = `Unhandled error recording hold ${pi.id} for ${orderCode}: ${e?.message || e}`;
             Logger.error(msg, loggerCtx, e?.stack);
             await notifyOpsSafe({ event: 'hold.webhook_error', text: msg, orderCode, paymentIntentId: pi.id, channelCode: channel.code });
@@ -377,6 +379,11 @@ export class StripeHoldService {
         };
     }
 
+    private async lockPayment(tctx: RequestContext, paymentId: ID): Promise<Payment | null> {
+        return this.connection.getRepository(tctx, Payment).createQueryBuilder('p')
+            .setLock('pessimistic_write').where('p.id = :id', { id: paymentId }).getOne();
+    }
+
     private async loadHold(ctx: RequestContext, paymentId: ID): Promise<{ payment?: Payment; error?: string }> {
         const codes = await getHoldMethodCodes(this.connection);
         const payment = await this.connection.getRepository(ctx, Payment).findOne({ where: { id: paymentId } as any, relations: ['order', 'order.channels'] });
@@ -398,7 +405,18 @@ export class StripeHoldService {
         // method lives on the ORDER's channel, so act in that channel.
         const actx = (await this.contextForPayment(payment)) ?? ctx;
         try {
-            const result = await this.connection.withTransaction(actx, tctx => this.orderService.settlePayment(tctx, paymentId));
+            // Row lock + state re-read: the hourly safety capture (worker), a
+            // Stripe `succeeded` webhook (server) and an admin click can overlap.
+            const result = await this.connection.withTransaction(actx, async tctx => {
+                const live = await this.lockPayment(tctx, paymentId);
+                if (!live || live.state !== 'Authorized') return { stale: live?.state ?? 'missing' };
+                return this.orderService.settlePayment(tctx, paymentId);
+            });
+            if ('stale' in result) {
+                const st = String(result.stale);
+                if (st === 'Settled' && by !== 'admin') return { ok: true, paymentId, state: st };
+                return { ok: false, paymentId, state: st, error: `payment_is_${st.toLowerCase()}` };
+            }
             if (isGraphQlErrorResult(result)) {
                 const msg = (result as any).paymentErrorMessage || result.message;
                 Logger.warn(`Capture of hold ${payment.transactionId} (${orderCode}) by ${by} failed: ${msg}`, loggerCtx);
@@ -431,7 +449,16 @@ export class StripeHoldService {
         const currency = payment.order?.currencyCode || '';
         const actx = (await this.contextForPayment(payment)) ?? ctx;
         try {
-            const result = await this.connection.withTransaction(actx, tctx => this.orderService.cancelPayment(tctx, paymentId));
+            const result = await this.connection.withTransaction(actx, async tctx => {
+                const live = await this.lockPayment(tctx, paymentId);
+                if (!live || live.state !== 'Authorized') return { stale: live?.state ?? 'missing' };
+                return this.orderService.cancelPayment(tctx, paymentId);
+            });
+            if ('stale' in result) {
+                const st = String(result.stale);
+                if (st === 'Cancelled' && by !== 'admin') return { ok: true, paymentId, state: st };
+                return { ok: false, paymentId, state: st, error: `payment_is_${st.toLowerCase()}` };
+            }
             if (isGraphQlErrorResult(result)) {
                 const msg = (result as any).paymentErrorMessage || result.message;
                 Logger.warn(`Release of hold ${payment.transactionId} (${orderCode}) by ${by} failed: ${msg}`, loggerCtx);

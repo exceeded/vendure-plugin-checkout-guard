@@ -8,6 +8,8 @@ import type { DbAdapter } from '@huloglobal/vendure-licence-sdk';
  */
 export const PAYMENT_EVENT_TABLE = 'checkout_guard_payment_event';
 export const FUNNEL_EVENT_TABLE = 'checkout_guard_funnel_event';
+/** Small key/value table shared by server and worker (reconciliation last-run). */
+export const STATE_TABLE = 'checkout_guard_state';
 
 export async function ensureObservabilitySchema(db: DbAdapter): Promise<void> {
     await db.query(`
@@ -47,4 +49,21 @@ export async function ensureObservabilitySchema(db: DbAdapter): Promise<void> {
             INDEX idx_cgfe_order (orderCode)
         )
     `);
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS ${STATE_TABLE} (
+            k VARCHAR(64) PRIMARY KEY,
+            v TEXT NOT NULL,
+            updatedAt DATETIME(3) NOT NULL
+        )
+    `);
+    // Vendure never indexes payment.transactionId or (state, method), yet the
+    // webhook dedupe, hold lookups and dashboard counts filter on them.
+    // Best effort: MariaDB ≥10.1 and Postgres accept IF NOT EXISTS; MySQL 8
+    // does not, and a host without ALTER rights just keeps the scans.
+    for (const ddl of [
+        'CREATE INDEX IF NOT EXISTS idx_cg_payment_txn ON payment (`transactionId`)',
+        'CREATE INDEX IF NOT EXISTS idx_cg_payment_state_method ON payment (state, method)',
+    ]) {
+        try { await db.query(ddl); } catch { /* optional */ }
+    }
 }

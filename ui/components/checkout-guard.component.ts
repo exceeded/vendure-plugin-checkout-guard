@@ -1,4 +1,4 @@
-import { Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { NotificationService, ModalService } from '@vendure/admin-ui/core';
 
@@ -103,6 +103,9 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
 @Component({
     selector: 'hulo-checkout-guard',
     standalone: false,
+    // The loaders already call markForCheck(); OnPush stops the template's
+    // helper calls (money(), kpi(), relative()) re-running on every event.
+    changeDetection: ChangeDetectionStrategy.OnPush,
     template: `
         <!-- ── HULO brand hero ─────────────────────────────────────── -->
         <vdr-page-block>
@@ -305,7 +308,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                             <table class="table" *ngIf="recentEvents.length; else noRecent">
                                 <thead><tr><th>When</th><th>Kind</th><th>Order</th><th>Detail</th></tr></thead>
                                 <tbody>
-                                    <tr *ngFor="let e of recentEvents">
+                                    <tr *ngFor="let e of recentEvents; trackBy: trackById">
                                         <td class="nowrap">{{ e.createdAt | date: 'd MMM, HH:mm' }}</td>
                                         <td><span class="level-pill" [ngClass]="kindClass(e.kind)">{{ kindLabel(e.kind) }}</span></td>
                                         <td><a *ngIf="e.orderId" [routerLink]="['/orders', e.orderId]">{{ e.orderCode || e.orderId }}</a><span *ngIf="!e.orderId">{{ e.orderCode || '—' }}</span></td>
@@ -338,7 +341,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr *ngFor="let h of holds">
+                                <tr *ngFor="let h of holds; trackBy: trackByPayment">
                                     <td><a *ngIf="h.orderId" [routerLink]="['/orders', h.orderId]">{{ h.orderCode || h.orderId }}</a><span *ngIf="!h.orderId">{{ h.orderCode || '—' }}</span></td>
                                     <td>{{ h.channelCode || '—' }}</td>
                                     <td class="num-col">{{ money(h.amount, h.currency) }}</td>
@@ -389,7 +392,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 </tr>
                             </thead>
                             <tbody>
-                                <tr *ngFor="let b of bank">
+                                <tr *ngFor="let b of bank; trackBy: trackByPayment">
                                     <td>
                                         <a *ngIf="b.orderId" [routerLink]="['/orders', b.orderId]">{{ b.orderCode || b.orderId }}</a><span *ngIf="!b.orderId">{{ b.orderCode || '—' }}</span>
                                         <div class="small muted" *ngIf="b.customerEmail">{{ b.customerEmail }}</div>
@@ -448,7 +451,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 <tr><th>When</th><th>Kind</th><th>Order</th><th>Provider</th><th>Code</th><th>Message</th><th class="num-col">Amount</th><th>IP</th></tr>
                             </thead>
                             <tbody>
-                                <tr *ngFor="let e of events">
+                                <tr *ngFor="let e of events; trackBy: trackById">
                                     <td class="nowrap">{{ e.createdAt | date: 'd MMM, HH:mm' }}</td>
                                     <td><span class="level-pill" [ngClass]="kindClass(e.kind)">{{ kindLabel(e.kind) }}</span></td>
                                     <td><a *ngIf="e.orderId" [routerLink]="['/orders', e.orderId]">{{ e.orderCode || e.orderId }}</a><span *ngIf="!e.orderId">{{ e.orderCode || '—' }}</span></td>
@@ -936,7 +939,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     }
 
     private loadRecentEvents() {
-        this.http.get<any>(`${API}/events`, { params: { days: '7' } }).subscribe({
+        this.http.get<any>(`${API}/events`, { params: { days: '7', limit: '8' } }).subscribe({
             next: r => { this.recentEvents = this.asList<EventRow>(r, 'events', 'items').slice(0, 8); this.cdr.markForCheck(); },
             error: () => undefined,
         });
@@ -1206,11 +1209,19 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     isSideStep(step: string): boolean { return FUNNEL_SIDE_STEPS.some(s => s.key === step); }
 
     /** Minor units → localised currency string; without a currency the value is shown as a plain decimal. */
+    private readonly formatters = new Map<string, Intl.NumberFormat>();
+    trackById(_: number, r: { id?: number | string }) { return r?.id ?? _; }
+    trackByPayment(_: number, r: { paymentId?: number | string }) { return r?.paymentId ?? _; }
+
     money(minor: number | null | undefined, currency?: string | null): string {
         if (minor == null || isNaN(Number(minor))) return '—';
         const major = Number(minor) / 100;
         if (currency) {
-            try { return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(major); } catch { /* unknown code */ }
+            try {
+                let f = this.formatters.get(currency);
+                if (!f) { f = new Intl.NumberFormat(undefined, { style: 'currency', currency }); this.formatters.set(currency, f); }
+                return f.format(major);
+            } catch { /* unknown code */ }
         }
         return major.toFixed(2) + (currency ? ' ' + currency : '');
     }

@@ -21,9 +21,24 @@ function inChannel(method: PaymentMethod, channelId: ID | undefined): boolean {
 
 /** Every PaymentMethod (any channel) whose handler is `code`. Uses the raw
  *  connection so crons can list without a channel ctx. */
+const METHODS_TTL_MS = 30_000;
+const methodsCache = new WeakMap<object, { at: number; all: PaymentMethod[] }>();
+
 export async function findMethodsByHandler(connection: TransactionalConnection, handlerCode: string): Promise<PaymentMethod[]> {
-    const all = await connection.rawConnection.getRepository(PaymentMethod).find({ relations: ['channels'] });
-    return all.filter(m => m.handler?.code === handlerCode);
+    // The table is tiny but a safety-capture pass loads it ~5× per hold; cache it briefly per connection.
+    const key = (connection?.rawConnection as object) || connection;
+    let hit = methodsCache.get(key);
+    if (!hit || Date.now() - hit.at > METHODS_TTL_MS) {
+        const all = await connection.rawConnection.getRepository(PaymentMethod).find({ relations: ['channels'] });
+        hit = { at: Date.now(), all };
+        methodsCache.set(key, hit);
+    }
+    return hit.all.filter(m => m.handler?.code === handlerCode);
+}
+
+/** Tests / method edits: forget the cached payment methods for a connection. */
+export function resetMethodsCache(connection?: TransactionalConnection): void {
+    if (connection) methodsCache.delete((connection.rawConnection as object) || connection);
 }
 
 /** Stripe secret key for the ctx channel, or undefined when the channel

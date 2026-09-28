@@ -12,17 +12,18 @@ async function capture(): Promise<string[]> {
 
 describe('ensureObservabilitySchema', () => {
     it('creates both tables idempotently', async () => {
-        const sql = await capture();
-        expect(sql).toHaveLength(2);
+        const sql = (await capture()).filter(s => /CREATE TABLE/i.test(s));
+        expect(sql).toHaveLength(3);
         expect(sql[0]).toContain(`CREATE TABLE IF NOT EXISTS ${PAYMENT_EVENT_TABLE}`);
         expect(sql[1]).toContain(`CREATE TABLE IF NOT EXISTS ${FUNNEL_EVENT_TABLE}`);
+        expect(sql[2]).toContain('CREATE TABLE IF NOT EXISTS checkout_guard_state');
         for (const k of ['failed', 'client_declined', 'orphan', 'amount_drift', 'hold_expired', 'bank_expired']) {
             expect(sql[0]).toContain(`'${k}'`);
         }
     });
 
     it('translates cleanly for Postgres', async () => {
-        for (const s of await capture()) {
+        for (const s of (await capture()).filter(x => /AUTO_INCREMENT/i.test(x))) {
             const pg = translateSql(s, 'postgres');
             expect(pg).not.toMatch(/ENUM\s*\(/i);
             expect(pg).not.toMatch(/AUTO_INCREMENT/i);

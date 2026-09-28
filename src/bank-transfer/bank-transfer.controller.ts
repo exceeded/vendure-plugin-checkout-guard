@@ -36,7 +36,7 @@ export class BankTransferController {
     ) {
         if (denyUnlessAdmin(ctx, res, false)) return;
         const st = STATUSES.includes(status as BankTransferListStatus) ? (status as BankTransferListStatus) : 'awaiting';
-        const rows = await this.service.list(st, Number(days) || 90, Number(limit) || 200);
+        const rows = await this.service.list(st, Number(days) || 90, Number(limit) || 200, ctx);
         const runtime = getBankTransferRuntime();
         return res.status(200).json({
             status: st,
@@ -50,7 +50,8 @@ export class BankTransferController {
     @Post('bank-transfers/:paymentId/received')
     async received(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('paymentId') paymentId: string) {
         if (denyUnlessAdmin(ctx, res, true)) return;
-        const result = await this.service.markReceived(paymentId);
+        if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
+        const result = await this.service.markReceived(paymentId, ctx);
         return res.status(result.ok ? 200 : 409).json(result);
     }
 
@@ -60,8 +61,9 @@ export class BankTransferController {
         @Param('paymentId') paymentId: string, @Body() body?: { reason?: string },
     ) {
         if (denyUnlessAdmin(ctx, res, true)) return;
+        if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
         const reason = typeof body?.reason === 'string' ? body.reason.trim().slice(0, 500) : undefined;
-        const result = await this.service.cancelByAdmin(paymentId, reason || undefined);
+        const result = await this.service.cancelByAdmin(paymentId, reason || undefined, ctx);
         return res.status(result.ok ? 200 : 409).json(result);
     }
 }

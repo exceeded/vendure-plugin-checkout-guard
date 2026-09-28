@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Logger, TransactionalConnection } from '@vendure/core';
 import { adapterFor, DbAdapter } from '@huloglobal/vendure-licence-sdk';
-import { summariseFunnel } from './funnel';
+import { summariseFunnelCounts } from './funnel';
 import { ensureObservabilitySchema, FUNNEL_EVENT_TABLE, PAYMENT_EVENT_TABLE } from './schema';
 import { BANK_METHOD_CODE, hasPremium, holdMethodCode, loggerCtx, noteLocked } from './runtime';
 import {
@@ -69,7 +69,14 @@ export class ObservabilityService implements OnModuleInit {
         try {
             await this.ensureSchema();
         } catch (e: any) {
-            Logger.error(`Observability schema init failed: ${e.message}`, loggerCtx);
+            // Server and worker boot together; on Postgres a concurrent
+            // CREATE TABLE IF NOT EXISTS can lose the race — retry once.
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+                await this.ensureSchema();
+            } catch (e2: any) {
+                Logger.warn(`Observability schema init failed: ${e2.message} (first attempt: ${e.message})`, loggerCtx);
+            }
         }
     }
 
@@ -218,7 +225,7 @@ export class ObservabilityService implements OnModuleInit {
         const params: any[] = [];
         let sql = `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE} e
                    WHERE e.kind = 'orphan' AND e.providerRef IS NOT NULL
-                     AND NOT EXISTS (SELECT 1 FROM payment p WHERE p.transactionId = e.providerRef)`;
+                     AND NOT EXISTS (SELECT 1 FROM payment p WHERE p.\`transactionId\` = e.providerRef)`;
         if (channelId) {
             sql += ' AND e.channelId = ?';
             params.push(channelId);
@@ -229,11 +236,34 @@ export class ObservabilityService implements OnModuleInit {
 
     /** Authorized payments for a handler code (holds pending / bank awaiting). */
     /** PaymentMethod codes (across channels) whose handler has this code. */
+    private codesCache = new Map<string, { at: number; codes: string[] }>();
+
     async methodCodesForHandler(handlerCode: string): Promise<string[]> {
+        const hit = this.codesCache.get(handlerCode);
+        if (hit && Date.now() - hit.at < 60_000) return hit.codes;
+        // Escape LIKE wildcards instead of deleting them (`_` is legal in a handler code).
+        const pat = `%"code":"${handlerCode.replace(/[\\%_]/g, m => '\\' + m).replace(/"/g, '')}"%`;
         const rows: Array<{ code: string }> = await this.db.query(
-            `SELECT code FROM payment_method WHERE handler LIKE ?`, [`%"code":"${handlerCode.replace(/[%_"\\]/g, '')}"%`],
+            `SELECT code FROM payment_method WHERE handler LIKE ?`, [pat],
         ).catch(() => []);
-        return (rows || []).map(r => r.code).filter(Boolean);
+        const codes = (rows || []).map(r => r.code).filter(Boolean);
+        this.codesCache.set(handlerCode, { at: Date.now(), codes });
+        return codes;
+    }
+
+    /** Which of `refs` already have an event of `kind` (one query per 500 refs). */
+    async existingPaymentEventRefs(kind: PaymentEventKind, refs: string[]): Promise<Set<string>> {
+        const out = new Set<string>();
+        const list = refs.filter(Boolean);
+        for (let i = 0; i < list.length; i += 500) {
+            const chunk = list.slice(i, i + 500);
+            const rows: Array<{ providerRef: string }> = await this.db.query(
+                `SELECT providerRef FROM ${PAYMENT_EVENT_TABLE} WHERE kind = ? AND providerRef IN (${chunk.map(() => '?').join(',')})`,
+                [kind, ...chunk],
+            ).catch(() => []);
+            for (const r of rows || []) if (r.providerRef) out.add(String(r.providerRef));
+        }
+        return out;
     }
 
     /** Authorized payments for a HANDLER (resolved to every method code using it). */
@@ -243,7 +273,7 @@ export class ObservabilityService implements OnModuleInit {
         const params: any[] = [...codes];
         let sql = `SELECT COUNT(*) AS n FROM payment p WHERE p.state = 'Authorized' AND p.method IN (${codes.map(() => '?').join(',')})`;
         if (channelId) {
-            sql += ` AND EXISTS (SELECT 1 FROM order_channels_channel oc WHERE oc.orderId = p.orderId AND oc.channelId = ?)`;
+            sql += ` AND EXISTS (SELECT 1 FROM order_channels_channel oc WHERE oc.\`orderId\` = p.\`orderId\` AND oc.\`channelId\` = ?)`;
             params.push(channelId);
         }
         const [row] = await this.db.query(sql, params).catch(() => [{ n: 0 }]);
@@ -256,7 +286,7 @@ export class ObservabilityService implements OnModuleInit {
         if (!c) return null;
         const rows = await this.db.query(
             `SELECT o.id, o.state,
-                    (SELECT MIN(oc.channelId) FROM order_channels_channel oc WHERE oc.orderId = o.id) AS channelId
+                    (SELECT MIN(oc.\`channelId\`) FROM order_channels_channel oc WHERE oc.\`orderId\` = o.id) AS channelId
              FROM \`order\` o WHERE o.code = ? LIMIT 1`,
             [c],
         ).catch(() => []);
@@ -292,14 +322,41 @@ export class ObservabilityService implements OnModuleInit {
     async funnelSummary(days: number | string = 7, channelId?: number | null): Promise<FunnelSummary> {
         const d = clampDays(days, 7);
         const params: any[] = [d];
-        let sql = `SELECT id, step, orderCode, sessionId, ip FROM ${FUNNEL_EVENT_TABLE}
+        // Aggregated in SQL: the table carries every beacon of every checkout,
+        // so the old "load the window and count in JS" grew without bound.
+        // Unique identity = order code, else session, else IP, else the row.
+        let sql = `SELECT step, COUNT(*) AS events,
+                          COUNT(DISTINCT CASE WHEN orderCode IS NOT NULL AND orderCode <> '' THEN CONCAT('o:', orderCode)
+                                              WHEN sessionId IS NOT NULL AND sessionId <> '' THEN CONCAT('s:', sessionId)
+                                              WHEN ip IS NOT NULL AND ip <> '' THEN CONCAT('ip:', ip)
+                                              ELSE CONCAT('row:', id) END) AS uniq
+                   FROM ${FUNNEL_EVENT_TABLE}
                    WHERE createdAt > DATE_SUB(NOW(), INTERVAL ? DAY)`;
         if (channelId) {
             sql += ' AND channelId = ?';
             params.push(channelId);
         }
-        const rows = await this.db.query(sql, params).catch(() => []);
-        return summariseFunnel(rows, d);
+        sql += ' GROUP BY step';
+        const rows: Array<{ step: string; events: any; uniq: any }> = await this.db.query(sql, params).catch(() => []);
+        return summariseFunnelCounts((rows || []).map(r => ({ step: String(r.step), events: Number(r.events || 0), unique: Number(r.uniq || 0) })), d);
+    }
+
+    /** Retention for payment events: short-lived kinds after `days`, dedupe kinds (orphan, drift, expiries) after `longDays`. */
+    async prunePaymentEvents(days = 180, longDays = 400): Promise<number> {
+        const d = clampDays(days, 180);
+        const l = Math.max(d, clampDays(longDays, 400));
+        let removed = 0;
+        const a = await this.db.query(
+            `DELETE FROM ${PAYMENT_EVENT_TABLE} WHERE kind IN ('failed', 'client_declined') AND createdAt < DATE_SUB(NOW(), INTERVAL ? DAY)`,
+            [d], { needAffected: true },
+        ).catch(() => null);
+        removed += Number(a?.affectedRows || 0);
+        const b = await this.db.query(
+            `DELETE FROM ${PAYMENT_EVENT_TABLE} WHERE createdAt < DATE_SUB(NOW(), INTERVAL ? DAY)`,
+            [l], { needAffected: true },
+        ).catch(() => null);
+        removed += Number(b?.affectedRows || 0);
+        return removed;
     }
 
     /** Retention: drop funnel rows older than `days` (default 90). Returns rows removed. */

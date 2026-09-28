@@ -3,6 +3,27 @@ import { Logger } from '@vendure/core';
 import { fanOutOpsEvent, OpsChannels, OpsEvent } from '../ops-notify';
 import { hasPremium, loggerCtx, noteLocked, runtimeOptions } from './runtime';
 
+/** Events delivered even on the free tier: the operator must hear that holds are not being recorded. */
+const ALWAYS_ALERT = new Set(['hold.webhook_error', 'webhook.error']);
+
+type SmtpSettings = { host: string; port: number; user: string; pass: string; from: string };
+
+/** One pooled transport per SMTP settings tuple, with timeouts (defaults are 2 min / 10 min). */
+let transportCache: { key: string; t: any } | null = null;
+function transportFor(nodemailer: any, smtp: SmtpSettings): any {
+    const key = [smtp.host, smtp.port, smtp.user, smtp.pass].join('|');
+    if (transportCache?.key === key) return transportCache.t;
+    try { transportCache?.t?.close?.(); } catch { /* ignore */ }
+    const t = nodemailer.createTransport({
+        host: smtp.host, port: smtp.port, secure: smtp.port === 465,
+        auth: { user: smtp.user, pass: smtp.pass },
+        pool: true, maxConnections: 2, maxMessages: 100,
+        connectionTimeout: 5_000, greetingTimeout: 5_000, socketTimeout: 10_000,
+    });
+    transportCache = { key, t };
+    return t;
+}
+
 /**
  * Ops alerts (premium). Fans one event out to every configured chat
  * webhook (`options.ops`) and, when `ops.adminEmail` plus SMTP_* env are
@@ -43,7 +64,8 @@ export class OpsAlertService {
      * that must not wait should `void` the promise.
      */
     async alert(ev: OpsEvent): Promise<void> {
-        if (!hasPremium()) {
+        // Licensing / webhook failures must still reach the operator when premium is locked.
+        if (!hasPremium() && !ALWAYS_ALERT.has(ev.event)) {
             noteLocked('Ops alerts');
             return;
         }
@@ -57,7 +79,7 @@ export class OpsAlertService {
         }
     }
 
-    private smtp(): { host: string; port: number; user: string; pass: string; from: string } | null {
+    private smtp(): SmtpSettings | null {
         if (process.env.SMTP_SERVER && process.env.SMTP_USER) {
             return {
                 host: process.env.SMTP_SERVER,
@@ -82,25 +104,28 @@ export class OpsAlertService {
             return;
         }
         try {
-            const transporter = nodemailer.createTransport({
-                host: smtp.host, port: smtp.port, secure: smtp.port === 465,
-                auth: { user: smtp.user, pass: smtp.pass },
-            });
+            const transporter = transportFor(nodemailer, smtp);
             const rows = [
                 ev.orderCode ? `<tr><td><b>Order</b></td><td>${escapeHtml(ev.orderCode)}</td></tr>` : '',
                 (ev.providerRef || ev.paymentIntentId) ? `<tr><td><b>Reference</b></td><td>${escapeHtml(String(ev.providerRef || ev.paymentIntentId))}</td></tr>` : '',
                 ev.amountMinor != null ? `<tr><td><b>Amount</b></td><td>${formatMinor(ev.amountMinor, ev.currency)}</td></tr>` : '',
                 ev.channelId != null ? `<tr><td><b>Channel</b></td><td>${escapeHtml(String(ev.channelId))}</td></tr>` : '',
             ].join('');
-            await transporter.sendMail({
+            await Promise.race([
+                transporter.sendMail({
                 from: smtp.from, to,
                 subject: `[Checkout Guard] ${ev.event}${ev.orderCode ? ` — ${ev.orderCode}` : ''}`,
                 html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">
                     <p>${escapeHtml(ev.text).replace(/\n/g, '<br>')}</p>
                     ${rows ? `<table cellpadding="4">${rows}</table>` : ''}
                     </div>`,
-            });
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (12 s)')), 12_000)),
+            ]);
         } catch (e: any) {
+            // Drop a broken pooled connection so the next alert reconnects.
+            try { transportCache?.t?.close?.(); } catch { /* ignore */ }
+            transportCache = null;
             Logger.warn(`Ops e-mail failed: ${e?.message || e}`, loggerCtx);
         }
     }

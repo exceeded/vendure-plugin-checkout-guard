@@ -107,7 +107,7 @@ export function readBankTransferPublicDetails(metadata: unknown): BankTransferPu
     }
     const pub = meta && typeof meta === 'object' ? meta.public : null;
     if (!pub || typeof pub !== 'object') return null;
-    if (pub.method !== BANK_TRANSFER_HANDLER_CODE && typeof pub.reference !== 'string') return null;
+    if (pub.method !== BANK_TRANSFER_HANDLER_CODE) return null;
     return pub as BankTransferPublicDetails;
 }
 

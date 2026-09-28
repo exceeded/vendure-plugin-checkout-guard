@@ -5,6 +5,72 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-09-28
+
+Reliability and performance pass — no new features. One small table
+(`checkout_guard_state`) and two best-effort indexes on `payment` are
+created on boot; nothing to migrate.
+
+### Fixed
+- **Bank transfer settle/cancel race.** "Mark as received" (server) and the
+  expiry sweep (worker) now settle or cancel under a `SELECT … FOR UPDATE`
+  with the payment state re-read inside the transaction, so a paid order can
+  no longer be cancelled by an overlapping sweep. The sweep also takes a
+  cross-process lock, records `expiredAt` before it cancels, and the
+  stranded-order repair only touches orders the sweep itself expired.
+- **Stripe hold capture/cancel race.** The hourly safety capture, a
+  `payment_intent.succeeded` webhook and an admin click can overlap: capture
+  and release now lock the payment row and re-check its state; a hold that
+  is already Settled/Cancelled reports success to non-admin callers instead
+  of raising a `capture_failed` alert.
+- **Postgres.** Every raw query that touches a Vendure table quotes its
+  camelCase columns (`transactionId`, `createdAt`, `orderId`, `channelId`,
+  `currencyCode`, `emailAddress`, `customerId`), which Postgres otherwise
+  folds to lowercase. Bank-transfer listing and sweep, orphan and hold KPIs,
+  `findOrderByCode` and reconciliation's known-intent set were silently
+  empty on Postgres hosts before.
+- **Ops alerts never hold a Stripe webhook.** Alerts from the hold path are
+  fire-and-forget; one pooled SMTP transport with 5 s connect / 10 s socket
+  timeouts and a 12 s send cap replaces a fresh transport per e-mail;
+  `hold.webhook_error` is delivered even when premium is locked and is also
+  logged at error level; chat webhooks now treat non-2xx as a failure.
+- **Rate limiter.** GraphQL comments are stripped before the mutation
+  matcher runs (`applyCouponCode # x\n(` was invisible to it); IPv6 clients
+  are bucketed per /64.
+- **Channel scoping.** Admins working in a non-default channel only see and
+  act on that channel's bank transfers, payment events, KPIs and funnel.
+- **Amount drift** is evaluated only once the order has left the payment
+  phase, so multi-payment checkouts are not reported as underpaid.
+- **Permissions.** Self-update, licence activate and deactivate require
+  SuperAdmin (they were reachable with `UpdateOrder`). `paymentId` route
+  params are validated. Purchase-link failures no longer echo upstream
+  error text; the evaluation reminder validates the e-mail and times out
+  after 8 s. `webhookSecretConfigured` also honours the
+  `STRIPE_CG_WEBHOOK_SECRET*` environment variables.
+- Tracking rows are inserted with `INSERT IGNORE` (no duplicate-key 500
+  after a concurrent settle).
+
+### Changed
+- **Funnel summary is aggregated in SQL** (`GROUP BY step` with
+  `COUNT(DISTINCT …)`) instead of loading every beacon in the window into
+  Node; `summariseFunnelCounts` exposes the same pure summary from counts.
+- **Retention cron** (worker, 03:20): funnel beacons 90 days, `failed` and
+  `client_declined` events 180 days, all other payment events 400 days.
+  Both tables grew without bound before.
+- **Reconciliation** takes a cross-process lock (admin "Run now" vs the
+  04:10 worker run), persists its last result in `checkout_guard_state` so
+  the dashboard shows it whichever process ran it, reads known intents in
+  one query and de-duplicates orphans in batches of 500 instead of one
+  `SELECT` per intent.
+- Best-effort indexes `idx_cg_payment_txn (transactionId)` and
+  `idx_cg_payment_state_method (state, method)` on Vendure's `payment`
+  table (skipped silently where the host cannot create them).
+- Payment-method lookups are cached for 30 s (bank-transfer codes, Stripe
+  keys) and handler-code `LIKE` patterns are escaped rather than stripped.
+- Admin UI: OnPush change detection, `trackBy` on every table, cached
+  currency formatters, and the overview fetches 8 recent events instead of
+  200.
+
 ## [0.1.2] — 2026-09-18
 
 ### Changed

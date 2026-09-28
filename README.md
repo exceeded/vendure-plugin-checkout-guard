@@ -130,7 +130,9 @@ to both to email the customer. Mark money received from the dashboard.
 - **Rate limits.** Defaults: `applyCouponCode` 10/min, `addPaymentToOrder`
   6/min, `createStripePaymentIntent` 6/min, `transitionOrderToState` 20/min
   per client IP; override with `rateLimits.mutations`. Limited requests get
-  `429 { errors: [{ message: 'rate_limited' }] }`.
+  `429 { errors: [{ message: 'rate_limited' }] }`. IPv6 clients are bucketed per /64. GraphQL
+  comments are stripped before matching, so `applyCouponCode # x\n(` cannot
+  slip past the limiter.
 
 ## Observability
 
@@ -143,7 +145,12 @@ to both to email the customer. Mark money received from the dashboard.
   PaymentIntent in the last `lookbackDays` is matched to a Vendure payment;
   unmatched ones are logged as `orphan` and alerted. `POST /checkout-guard/reconcile/run` runs it now.
 - A settled payment whose amount differs from the order total is logged as
-  `amount_drift` and alerted.
+  `amount_drift` and alerted. The check runs once the order has left the
+  payment phase, so a split payment (gift card + card) is not reported.
+- Retention (worker, 03:20): funnel beacons are kept 90 days, `failed` and
+  `client_declined` events 180 days, everything else 400 days.
+- Admins working in a non-default channel only see that channel's events,
+  bank transfers and KPIs; the default channel sees every channel.
 - `countRecentFailures(ip, minutes)` on `ObservabilityService` is what the
   HULO Fraud Prevention plugin uses for its *failed payments* signal.
 

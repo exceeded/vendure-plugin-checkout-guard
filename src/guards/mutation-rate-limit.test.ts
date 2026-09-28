@@ -6,6 +6,8 @@ import {
     rateLimitedBody,
     resolveMutationRateLimits,
     shopApiMutationRateLimitMiddleware,
+    rateLimitBucket,
+    stripGraphQlComments,
 } from './mutation-rate-limit';
 
 const KNOWN = Object.keys(DEFAULT_MUTATION_RATE_LIMITS);
@@ -176,5 +178,22 @@ describe('createMutationRateLimitHandler', () => {
         expect(mw.route).toBe('store-api');
         expect(mw.beforeListen).toBeUndefined();
         expect(typeof mw.handler).toBe('function');
+    });
+});
+
+describe('stripGraphQlComments / rateLimitBucket', () => {
+    it('a comment between the field name and its arguments does not hide the mutation', () => {
+        const doc = 'mutation { applyCouponCode # sneaky\n(couponCode: "A") { ... on Order { id } } }';
+        expect(extractMutationNames({ query: doc }, ['applyCouponCode'])).toEqual(['applyCouponCode']);
+        expect(stripGraphQlComments('a # b\nc')).toBe('a \nc');
+        expect(stripGraphQlComments('"""doc # not a comment"""x')).toBe('""x');
+    });
+    it('buckets IPv6 clients per /64 and leaves IPv4 alone', () => {
+        expect(rateLimitBucket('198.51.100.7')).toBe('198.51.100.7');
+        expect(rateLimitBucket('::ffff:198.51.100.7')).toBe('::ffff:198.51.100.7');
+        expect(rateLimitBucket('2001:db8:1:2:3:4:5:6')).toBe('2001:db8:1:2::/64');
+        expect(rateLimitBucket('2001:db8::1')).toBe('2001:db8:0:0::/64');
+        expect(rateLimitBucket('2001:db8::5')).toBe(rateLimitBucket('2001:db8::1'));
+        expect(rateLimitBucket(null)).toBeNull();
     });
 });

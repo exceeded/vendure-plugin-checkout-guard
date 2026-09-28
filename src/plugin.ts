@@ -197,7 +197,7 @@ export class CheckoutGuardPlugin {
         configureStripeHold({
             getOptions: () => options.stripe || {},
             hasPremiumAccess: premium,
-            notifyOps: async ev => { if (ops) await ops.alert(ev as any); },
+            notifyOps: async ev => { if (ops) void ops.alert(ev as any); },
             recordPaymentEvent: async ev => { if (events) await events.recordPaymentEvent(ev as any); },
         });
         setBankTransferRuntime({

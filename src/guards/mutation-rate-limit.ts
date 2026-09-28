@@ -85,8 +85,24 @@ function queriesIn(body: unknown): string[] {
  * `mutation` keyword are inspected, and only field selections with an
  * argument list count, so a query merely mentioning a name is ignored.
  */
+/** GraphQL allows `# comments` between any tokens: `applyCouponCode # x\n(` is valid and must still match. */
+export function stripGraphQlComments(q: string): string {
+    return q.replace(/"{3}[\s\S]*?"{3}/g, '""').replace(/#[^\n\r]*/g, '');
+}
+
+/** Rate-limit key for an address: IPv6 clients are bucketed per /64 (one subscriber), IPv4 per address. */
+export function rateLimitBucket(ip: string | null): string | null {
+    if (!ip) return null;
+    if (!ip.includes(':') || ip.startsWith('::ffff:')) return ip;
+    const [head, tail = ''] = ip.split('::');
+    const left = head ? head.split(':') : [];
+    const right = tail ? tail.split(':') : [];
+    const groups = [...left, ...new Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
+    return groups.slice(0, 4).map(g => g || '0').join(':') + '::/64';
+}
+
 export function extractMutationNames(body: unknown, known: Iterable<string>): string[] {
-    const queries = queriesIn(body).filter(q => MUTATION_KEYWORD.test(q));
+    const queries = queriesIn(body).map(stripGraphQlComments).filter(q => MUTATION_KEYWORD.test(q));
     if (queries.length === 0) return [];
     const found: string[] = [];
     for (const name of known) {
@@ -133,7 +149,7 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         });
     }
     const names = Array.from(limiters.keys());
-    const keyFor = opts.keyFor || ((req: Request) => getClientIp(req, { header: opts.clientIpHeader }));
+    const keyFor = opts.keyFor || ((req: Request) => rateLimitBucket(getClientIp(req, { header: opts.clientIpHeader })));
     const onLimited = opts.onLimited || (({ mutation, key, limit }) => {
         Logger.warn(`Rate limit hit: ${mutation} from ${key} (${limit.capacity}/${Math.round(limit.windowMs / 1000)}s)`, GUARDS_LOGGER_CTX);
     });

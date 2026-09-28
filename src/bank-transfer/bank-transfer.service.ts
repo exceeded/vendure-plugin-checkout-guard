@@ -1,4 +1,5 @@
 import { adapterFor } from '@huloglobal/vendure-licence-sdk';
+import { withDbLock } from '../db-lock';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
     Channel,
@@ -137,7 +138,16 @@ export class BankTransferService implements OnModuleInit {
      * second channel could be `bacs`). Resolve every enabled-or-not method
      * whose handler is ours.
      */
+    private codesCache: { at: number; codes: string[] } | null = null;
+
     async bankTransferMethodCodes(): Promise<string[]> {
+        if (this.codesCache && Date.now() - this.codesCache.at < 30_000) return this.codesCache.codes;
+        const codes = await this.loadBankTransferMethodCodes();
+        this.codesCache = { at: Date.now(), codes };
+        return codes;
+    }
+
+    private async loadBankTransferMethodCodes(): Promise<string[]> {
         const rows: Array<{ code: string; handler: unknown }> = await this.db.query(
             `SELECT code, handler FROM payment_method`,
         );
@@ -160,11 +170,17 @@ export class BankTransferService implements OnModuleInit {
     }
 
     // ── Listing (admin) ─────────────────────────────────────────────────
-    async list(status: BankTransferListStatus = 'awaiting', days = 90, limit = 200): Promise<BankTransferRow[]> {
+    async list(status: BankTransferListStatus = 'awaiting', days = 90, limit = 200, ctx?: RequestContext): Promise<BankTransferRow[]> {
         const codes = await this.bankTransferMethodCodes();
         const runtime = getBankTransferRuntime();
         const where: string[] = [`p.method IN (${this.placeholders(codes.length)})`];
         const params: any[] = [...codes];
+        // A non-default channel admin only sees that channel's orders.
+        const scope = scopedChannelId(ctx);
+        if (scope) {
+            where.push('EXISTS (SELECT 1 FROM order_channels_channel x WHERE x.\`orderId\` = o.id AND x.\`channelId\` = ?)');
+            params.push(scope);
+        }
         switch (status) {
             case 'awaiting':
                 where.push(`p.state = 'Authorized'`);
@@ -183,26 +199,26 @@ export class BankTransferService implements OnModuleInit {
                 break;
         }
         const safeDays = Math.max(1, Math.min(3650, Math.floor(Number(days) || 90)));
-        where.push(`p.createdAt >= DATE_SUB(NOW(), INTERVAL ? DAY)`);
+        where.push(`p.\`createdAt\` >= DATE_SUB(NOW(), INTERVAL ? DAY)`);
         params.push(safeDays);
         const safeLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 200)));
 
         const rows: any[] = await this.db.query(
-            `SELECT p.id AS paymentId, p.state AS paymentState, p.amount AS amountMinor, p.createdAt AS createdAt,
-                    p.updatedAt AS paymentUpdatedAt, p.metadata AS metadata,
-                    o.id AS orderId, o.code AS orderCode, o.state AS orderState, o.currencyCode AS currency,
-                    c.emailAddress AS customerEmail,
+            `SELECT p.id AS paymentId, p.state AS paymentState, p.amount AS amountMinor, p.\`createdAt\` AS createdAt,
+                    p.\`updatedAt\` AS paymentUpdatedAt, p.metadata AS metadata,
+                    o.id AS orderId, o.code AS orderCode, o.state AS orderState, o.\`currencyCode\` AS currency,
+                    c.\`emailAddress\` AS customerEmail,
                     ch.id AS channelId, ch.code AS channelCode,
                     t.reminderSentAt AS reminderSentAt, t.expiredAt AS expiredAt, t.settledAt AS settledAt,
                     t.cancelledAt AS cancelledAt, t.payBy AS trackedPayBy
              FROM payment p
-             JOIN \`order\` o ON o.id = p.orderId
-             LEFT JOIN customer c ON c.id = o.customerId
-             LEFT JOIN order_channels_channel occ ON occ.orderId = o.id
-             LEFT JOIN channel ch ON ch.id = occ.channelId
+             JOIN \`order\` o ON o.id = p.\`orderId\`
+             LEFT JOIN customer c ON c.id = o.\`customerId\`
+             LEFT JOIN order_channels_channel occ ON occ.\`orderId\` = o.id
+             LEFT JOIN channel ch ON ch.id = occ.\`channelId\`
              LEFT JOIN checkout_guard_bank_transfer t ON t.paymentId = p.id
              WHERE ${where.join(' AND ')}
-             ORDER BY p.createdAt DESC
+             ORDER BY p.\`createdAt\` DESC
              LIMIT ${safeLimit * 4}`,
             params,
         );
@@ -259,14 +275,23 @@ export class BankTransferService implements OnModuleInit {
 
     // ── Admin actions ───────────────────────────────────────────────────
     /** Funds arrived: settle the payment, which moves the order to PaymentSettled. */
-    async markReceived(paymentId: ID): Promise<BankTransferActionResult> {
+    async markReceived(paymentId: ID, reqCtx?: RequestContext): Promise<BankTransferActionResult> {
         const payment = await this.loadBankTransferPayment(paymentId);
-        if (!payment) return { ok: false, error: 'not_a_bank_transfer_payment' };
+        if (!payment || !visibleIn(payment, reqCtx)) return { ok: false, error: 'not_a_bank_transfer_payment' };
         if (payment.state !== 'Authorized') {
             return { ok: false, error: `payment_not_authorized:${payment.state}`, paymentState: payment.state, orderState: payment.order.state };
         }
         const ctx = await this.contextForOrder(payment.order);
-        const result = await this.orderService.settlePayment(ctx, payment.id);
+        // Settle under a row lock with the state re-read inside it, so the
+        // expiry sweep (worker) and this admin action (server) cannot both act.
+        const result = await this.connection.withTransaction(ctx, async tctx => {
+            const live = await this.lockPayment(tctx, payment.id);
+            if (!live || live.state !== 'Authorized') return { stale: live?.state ?? 'missing' };
+            return this.orderService.settlePayment(tctx, payment.id);
+        });
+        if ('stale' in result) {
+            return { ok: false, error: `payment_not_authorized:${result.stale}`, paymentState: String(result.stale), orderState: payment.order.state };
+        }
         if (isGraphQlErrorResult(result)) {
             return { ok: false, error: result.message, paymentState: payment.state, orderState: payment.order.state };
         }
@@ -278,9 +303,9 @@ export class BankTransferService implements OnModuleInit {
     }
 
     /** Admin cancel: cancel the payment and the order (no expiry event). */
-    async cancelByAdmin(paymentId: ID, reason?: string): Promise<BankTransferActionResult> {
+    async cancelByAdmin(paymentId: ID, reason?: string, reqCtx?: RequestContext): Promise<BankTransferActionResult> {
         const payment = await this.loadBankTransferPayment(paymentId);
-        if (!payment) return { ok: false, error: 'not_a_bank_transfer_payment' };
+        if (!payment || !visibleIn(payment, reqCtx)) return { ok: false, error: 'not_a_bank_transfer_payment' };
         if (payment.state !== 'Authorized') {
             return { ok: false, error: `payment_not_authorized:${payment.state}`, paymentState: payment.state, orderState: payment.order.state };
         }
@@ -314,6 +339,15 @@ export class BankTransferService implements OnModuleInit {
         }
         this.lockedLogged = false;
 
+        const locked = await withDbLock(this.connection.rawConnection, 'bank-sweep', () => this.sweepLocked(now, runtime));
+        if (!locked.acquired) {
+            Logger.warn('Bank-transfer sweep skipped — another process holds the sweep lock', loggerCtx);
+            return { scanned: 0, expired: 0, reminded: 0, repaired: 0, skipped: 'locked' };
+        }
+        return locked.result!;
+    }
+
+    private async sweepLocked(now: Date, runtime: ReturnType<typeof getBankTransferRuntime>): Promise<BankTransferSweepResult> {
         const candidates = await this.findAwaitingCandidates();
         const result: BankTransferSweepResult = { scanned: candidates.length, expired: 0, reminded: 0, repaired: 0, skipped: null };
         for (const c of candidates) {
@@ -335,6 +369,11 @@ export class BankTransferService implements OnModuleInit {
                 await this.ensureTracked(payment, ctx.channelId, decision.expiresAt);
 
                 if (decision.expire) {
+                    // Record the expiry before cancelling so a half-finished
+                    // cancellation is recognisable (and repairable) as ours.
+                    await this.db.query(
+                        `UPDATE checkout_guard_bank_transfer SET expiredAt = NOW() WHERE paymentId = ? AND expiredAt IS NULL`, [payment.id],
+                    );
                     const outcome = await this.cancelPaymentAndOrder(
                         ctx, payment, `Bank transfer not received by ${decision.expiresAt.toISOString().slice(0, 10)}`,
                     );
@@ -381,8 +420,9 @@ export class BankTransferService implements OnModuleInit {
             `SELECT o.id AS orderId, o.code AS orderCode
              FROM \`order\` o
              WHERE o.state = 'PaymentAuthorized'
-               AND EXISTS (SELECT 1 FROM payment p WHERE p.orderId = o.id AND p.method IN (${ph}) AND p.state = 'Cancelled')
-               AND NOT EXISTS (SELECT 1 FROM payment p2 WHERE p2.orderId = o.id AND p2.state IN ('Authorized', 'Settled'))
+               AND EXISTS (SELECT 1 FROM payment p WHERE p.\`orderId\` = o.id AND p.method IN (${ph}) AND p.state = 'Cancelled')
+               AND NOT EXISTS (SELECT 1 FROM payment p2 WHERE p2.\`orderId\` = o.id AND p2.state IN ('Authorized', 'Settled'))
+               AND EXISTS (SELECT 1 FROM checkout_guard_bank_transfer t WHERE t.orderId = o.id AND t.expiredAt IS NOT NULL)
              LIMIT 100`,
             codes,
         ).catch(() => []);
@@ -416,25 +456,25 @@ export class BankTransferService implements OnModuleInit {
         const codes = await this.bankTransferMethodCodes();
         const ph = this.placeholders(codes.length);
         const rows: any[] = await this.db.query(
-            `SELECT p.id AS paymentId, p.createdAt AS paymentCreatedAt, p.amount AS amount, p.metadata AS metadata,
+            `SELECT p.id AS paymentId, p.\`createdAt\` AS paymentCreatedAt, p.amount AS amount, p.metadata AS metadata,
                     o.id AS orderId, o.code AS orderCode,
-                    MIN(occ.channelId) AS channelId,
+                    MIN(occ.\`channelId\`) AS channelId,
                     t.reminderSentAt AS reminderSentAt
              FROM payment p
-             JOIN \`order\` o ON o.id = p.orderId
-             JOIN order_channels_channel occ ON occ.orderId = o.id
+             JOIN \`order\` o ON o.id = p.\`orderId\`
+             JOIN order_channels_channel occ ON occ.\`orderId\` = o.id
              LEFT JOIN checkout_guard_bank_transfer t ON t.paymentId = p.id
              WHERE o.state = 'PaymentAuthorized'
                AND p.state = 'Authorized'
                AND p.method IN (${ph})
                AND NOT EXISTS (
                    SELECT 1 FROM payment p2
-                   WHERE p2.orderId = o.id AND p2.id <> p.id
+                   WHERE p2.\`orderId\` = o.id AND p2.id <> p.id
                      AND p2.state IN ('Authorized', 'Settled')
                      AND p2.method NOT IN (${ph})
                )
-             GROUP BY p.id, p.createdAt, p.amount, p.metadata, o.id, o.code, t.reminderSentAt
-             ORDER BY p.createdAt ASC
+             GROUP BY p.id, p.\`createdAt\`, p.amount, p.metadata, o.id, o.code, t.reminderSentAt
+             ORDER BY p.\`createdAt\` ASC
              LIMIT 500`,
             [...codes, ...codes],
         );
@@ -462,7 +502,7 @@ export class BankTransferService implements OnModuleInit {
         let channel: Channel | undefined = order.channels?.find(ch => String(ch.id) !== '1') ?? order.channels?.[0];
         if (!channel) {
             const rows: Array<{ channelId: ID }> = await this.db.query(
-                `SELECT channelId FROM order_channels_channel WHERE orderId = ? ORDER BY channelId DESC`, [order.id],
+                `SELECT \`channelId\` FROM order_channels_channel WHERE \`orderId\` = ? ORDER BY \`channelId\` DESC`, [order.id],
             );
             const id = rows?.[0]?.channelId;
             channel = id
@@ -479,8 +519,21 @@ export class BankTransferService implements OnModuleInit {
         });
     }
 
+    /** The payment row under `SELECT … FOR UPDATE` inside `tctx`'s transaction. */
+    private async lockPayment(tctx: RequestContext, paymentId: ID): Promise<Payment | null> {
+        return this.connection.getRepository(tctx, Payment).createQueryBuilder('p')
+            .setLock('pessimistic_write').where('p.id = :id', { id: paymentId }).getOne();
+    }
+
     private async cancelPaymentAndOrder(ctx: RequestContext, payment: Payment, reason: string): Promise<BankTransferActionResult> {
-        const cancelPayment = await this.orderService.cancelPayment(ctx, payment.id);
+        const cancelPayment = await this.connection.withTransaction(ctx, async tctx => {
+            const live = await this.lockPayment(tctx, payment.id);
+            if (!live || live.state !== 'Authorized') return { stale: live?.state ?? 'missing' };
+            return this.orderService.cancelPayment(tctx, payment.id);
+        });
+        if ('stale' in cancelPayment) {
+            return { ok: false, error: `payment_not_authorized:${cancelPayment.stale}`, paymentState: String(cancelPayment.stale), orderState: payment.order.state };
+        }
         if (isGraphQlErrorResult(cancelPayment)) {
             return { ok: false, error: `cancel_payment_failed: ${cancelPayment.message}`, paymentState: payment.state, orderState: payment.order.state };
         }
@@ -492,17 +545,29 @@ export class BankTransferService implements OnModuleInit {
     }
 
     private async ensureTracked(payment: Payment, channelId: ID, expiresAt?: Date): Promise<void> {
-        const existing = await this.db.query(`SELECT paymentId FROM checkout_guard_bank_transfer WHERE paymentId = ?`, [payment.id]);
-        if (existing?.length) return;
         const details = readBankTransferPublicDetails(payment.metadata);
         const payBy = expiresAt ?? parsePayBy(details)
             ?? new Date(new Date(payment.createdAt).getTime() + getBankTransferRuntime().expiryDays * 86_400_000);
+        // Idempotent (primary key on paymentId): a concurrent sweep + admin action cannot throw here.
         await this.db.query(
-            `INSERT INTO checkout_guard_bank_transfer (paymentId, orderId, orderCode, channelId, amountMinor, currency, payBy)
+            `INSERT IGNORE INTO checkout_guard_bank_transfer (paymentId, orderId, orderCode, channelId, amountMinor, currency, payBy)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [payment.id, payment.order.id, payment.order.code, channelId, payment.amount, details?.currency ?? payment.order.currencyCode ?? null, toSqlDateTime(payBy)],
         );
     }
+}
+
+/** The channel an admin request is scoped to: null for the default channel (sees everything). */
+function scopedChannelId(ctx?: RequestContext): number | null {
+    if (!ctx?.channelId) return null;
+    if (ctx.channel?.code === '__default_channel__' || String(ctx.channelId) === '1') return null;
+    return Number(ctx.channelId);
+}
+
+function visibleIn(payment: Payment, ctx?: RequestContext): boolean {
+    const scope = scopedChannelId(ctx);
+    if (!scope) return true;
+    return (payment.order?.channels || []).some(ch => String(ch.id) === String(scope));
 }
 
 function toIso(value: string | Date | null | undefined): string | null {
