@@ -26,6 +26,7 @@ const CONSTANTS: Record<string, string> = {
     PAYMENT_EVENT_TABLE: 'checkout_guard_payment_event',
     FUNNEL_EVENT_TABLE: 'checkout_guard_funnel_event',
     STATE_TABLE: 'checkout_guard_state',
+    COUNTER_TABLE: 'cg_counter',
 };
 
 /** `${expr}` → SQL fragment. Unknown expressions fail the test so new call sites are handled deliberately. */

@@ -1,4 +1,4 @@
-import { PluginCommonModule, RuntimeVendureConfig, Type, VendurePlugin, TransactionalConnection } from '@vendure/core';
+import { Logger, PluginCommonModule, ProcessContext, RuntimeVendureConfig, Type, VendurePlugin, TransactionalConnection } from '@vendure/core';
 import {
     fingerprintPublicKey, Heartbeat, LicenceStatus, RevocationChecker, UpdateChecker, verifyLicence,
     warnIfIncompatibleVendure, EvaluationClient, EvaluationState, LicenceStore, adapterFor,
@@ -17,10 +17,10 @@ import {
 } from './bank-transfer';
 import {
     registerCheckoutGuardCustomFields, trustedClientIpMiddleware, shopApiMutationRateLimitMiddleware,
-    SessionHashSubscriber, TrustedClientIpOptions, MutationRateLimitOverrides,
+    SessionHashSubscriber, TrustedClientIpOptions, MutationRateLimitOverrides, setCounterSink,
 } from './guards';
 import {
-    ObservabilityController, ObservabilityService, OpsAlertService, ReconciliationService,
+    ObservabilityController, ObservabilityService, OpsAlertService, CounterService, ReconciliationService,
     AmountDriftSubscriber, BankExpirySubscriber, configureObservability, ObservabilityOpsOptions,
 } from './observability';
 
@@ -91,7 +91,7 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
         StripeHoldService, StripeHoldCron,
         BankTransferService, BankTransferCrons,
         SessionHashSubscriber,
-        ObservabilityService, OpsAlertService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber,
+        ObservabilityService, OpsAlertService, CounterService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber,
     ],
     compatibility: '>=3.5.0 <4.0.0',
     configuration: (config: RuntimeVendureConfig) => {
@@ -135,8 +135,19 @@ export class CheckoutGuardPlugin {
     static startEvaluation(): void {
         if (!CheckoutGuardPlugin.evalClientInternal) {
             CheckoutGuardPlugin.evalClientInternal = new EvaluationClient({ packageName: PKG_NAME, packageVersion: PKG_VERSION });
+            if (CheckoutGuardPlugin.statsProvider) CheckoutGuardPlugin.evalClientInternal.setStatsProvider(CheckoutGuardPlugin.statsProvider);
             CheckoutGuardPlugin.evalClientInternal.start();
         }
+    }
+
+    private static statsProvider: (() => Promise<Record<string, number>>) | null = null;
+
+    /** Anonymous usage numbers (last 30 days) sent with the heartbeat and
+     *  the evaluation ping, so licensed installs keep reporting after purchase. */
+    static setStatsProvider(fn: () => Promise<Record<string, number>>): void {
+        CheckoutGuardPlugin.statsProvider = fn;
+        CheckoutGuardPlugin.heartbeat?.setStatsProvider(fn);
+        CheckoutGuardPlugin.evalClientInternal?.setStatsProvider(fn);
     }
 
     private static licenceHost = '';
@@ -165,24 +176,40 @@ export class CheckoutGuardPlugin {
         CheckoutGuardPlugin.evalClientInternal?.start();
     }
 
-    constructor(private connection: TransactionalConnection, private moduleRef: ModuleRef) {}
+    constructor(private connection: TransactionalConnection, private moduleRef: ModuleRef, private processContext: ProcessContext) {}
 
     /** Apply an admin-activated licence key persisted in the DB (an
      *  explicitly configured env/init key always wins), then hand the
-     *  feature modules their runtime hooks. */
+     *  feature modules their runtime hooks and start the engagement
+     *  pieces (usage stats, weekly report on the worker). */
     async onApplicationBootstrap() {
         CheckoutGuardPlugin.wireRuntimes(this.moduleRef);
-        if (CheckoutGuardPlugin.licenceStatus?.valid) return;
+        if (!CheckoutGuardPlugin.licenceStatus?.valid) {
+            try {
+                const store = new LicenceStore((sql, params) => adapterFor(this.connection.rawConnection).query(sql, params));
+                await store.ensureTable();
+                const stored = await store.load(PLUGIN_ID);
+                if (stored) {
+                    const st = CheckoutGuardPlugin.activateRuntimeLicence(stored);
+                    // eslint-disable-next-line no-console
+                    if (st.valid) console.log(`[${PKG_NAME}] licence restored from admin activation — ${st.message}`);
+                }
+            } catch { /* store failures never affect boot */ }
+        }
         try {
-            const store = new LicenceStore((sql, params) => adapterFor(this.connection.rawConnection).query(sql, params));
-            await store.ensureTable();
-            const stored = await store.load(PLUGIN_ID);
-            if (stored) {
-                const st = CheckoutGuardPlugin.activateRuntimeLicence(stored);
-                // eslint-disable-next-line no-console
-                if (st.valid) console.log(`[${PKG_NAME}] licence restored from admin activation — ${st.message}`);
-            }
-        } catch { /* store failures never affect boot */ }
+            const service = this.moduleRef.get(CheckoutGuardService, { strict: false });
+            await service.ensureEngagementTables();
+            const digest = service.initEngagement({
+                getOptions: () => getOptions(),
+                getLicenceStatus: () => CheckoutGuardPlugin.getLicenceStatus(),
+                getEvalState: () => CheckoutGuardPlugin.getEvalState(),
+                hasPremiumAccess: () => CheckoutGuardPlugin.hasPremiumAccess(),
+            });
+            CheckoutGuardPlugin.setStatsProvider(() => service.evalStats());
+            if (this.processContext.isWorker) digest.start();
+        } catch (e: any) {
+            Logger.warn(`Engagement setup skipped: ${e?.message || e}`, 'CheckoutGuard');
+        }
     }
 
     /** Feature modules never import this class; they read options and the
@@ -192,8 +219,11 @@ export class CheckoutGuardPlugin {
         const premium = () => CheckoutGuardPlugin.hasPremiumAccess();
         let ops: OpsAlertService | null = null;
         let events: ObservabilityService | null = null;
+        let counters: CounterService | null = null;
         try { ops = moduleRef?.get(OpsAlertService, { strict: false }) ?? null; } catch { ops = null; }
         try { events = moduleRef?.get(ObservabilityService, { strict: false }) ?? null; } catch { events = null; }
+        try { counters = moduleRef?.get(CounterService, { strict: false }) ?? null; } catch { counters = null; }
+        if (counters) { const c = counters; setCounterSink(name => c.bump(name)); }
         configureStripeHold({
             getOptions: () => options.stripe || {},
             hasPremiumAccess: premium,

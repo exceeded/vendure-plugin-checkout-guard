@@ -4,6 +4,7 @@ import type { Middleware } from '@vendure/core';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { ClientIpResolveOptions, getClientIp } from './client-ip';
 import { GUARDS_LOGGER_CTX } from './constants';
+import { bumpCounter } from './counters';
 
 export interface MutationRateLimit {
     /** Requests allowed per window (token-bucket capacity). */
@@ -180,6 +181,7 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
             const entry = limiters.get(mutation);
             if (!entry) continue;
             if (!entry.limiter.allow(`${mutation}|${key}`)) {
+                bumpCounter('rate_limit');
                 onLimited({ mutation, key, limit: entry.limit });
                 res.status(429);
                 res.setHeader('Retry-After', String(Math.max(1, Math.ceil(entry.limit.windowMs / 1000))));

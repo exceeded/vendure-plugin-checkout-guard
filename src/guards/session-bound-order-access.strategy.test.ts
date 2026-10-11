@@ -89,3 +89,22 @@ describe('SessionBoundOrderByCodeAccessStrategy', () => {
         expect(strategy.canAccessOrder(ctx(), undefined as any)).toBe(false);
     });
 });
+
+describe('usage counter', () => {
+    it('counts every refusal and never a grant', async () => {
+        const { setCounterSink } = await import('./counters');
+        const seen: string[] = [];
+        setCounterSink(name => seen.push(name));
+        try {
+            const strategy = new SessionBoundOrderByCodeAccessStrategy('2h');
+            const order: any = { orderPlacedAt: new Date(), customer: { user: { id: 7 } }, customFields: { cgSessionHash: hashSessionToken('tok') } };
+            expect(strategy.canAccessOrder({ activeUserId: 7 } as any, order)).toBe(true);
+            expect(strategy.canAccessOrder({ activeUserId: 8 } as any, order)).toBe(false);
+            expect(strategy.canAccessOrder({ session: { token: 'other' } } as any, order)).toBe(false);
+            expect(strategy.canAccessOrder({ session: { token: 'tok' } } as any, order)).toBe(true);
+            expect(seen).toEqual(['order_access_denied', 'order_access_denied']);
+        } finally {
+            setCounterSink(null);
+        }
+    });
+});

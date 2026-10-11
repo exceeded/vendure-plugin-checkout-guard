@@ -104,6 +104,21 @@ export interface FunnelSummary {
     couponRejections: number;
 }
 
+/** Usage counters for one window (digest, heartbeat, evaluation, widget). */
+export interface UsageStats {
+    holdsPlaced: number;
+    holdsCaptured: number;
+    holdsCancelled: number;
+    /** Minor units of the holds placed in the window. */
+    heldValuePence: number;
+    bankTransfersConfirmed: number;
+    rateLimitRejections: number;
+    orderAccessDenied: number;
+    orphansFound: number;
+    /** Currency of `heldValuePence` when every hold shares one; null when mixed or none. */
+    heldCurrency: string | null;
+}
+
 export interface ObservabilitySummary {
     holdsPending: number;
     bankAwaiting: number;

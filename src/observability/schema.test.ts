@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { translateSql } from '@huloglobal/vendure-licence-sdk';
-import { ensureObservabilitySchema, FUNNEL_EVENT_TABLE, PAYMENT_EVENT_TABLE } from './schema';
+import { COUNTER_TABLE, ensureObservabilitySchema, FUNNEL_EVENT_TABLE, PAYMENT_EVENT_TABLE } from './schema';
 
 /** Capture the DDL the schema helper issues, then translate it for Postgres
  *  to prove nothing MySQL-only (ENUM, inline INDEX, DATETIME(3)) survives. */
@@ -13,10 +13,12 @@ async function capture(): Promise<string[]> {
 describe('ensureObservabilitySchema', () => {
     it('creates both tables idempotently', async () => {
         const sql = (await capture()).filter(s => /CREATE TABLE/i.test(s));
-        expect(sql).toHaveLength(3);
+        expect(sql).toHaveLength(4);
         expect(sql[0]).toContain(`CREATE TABLE IF NOT EXISTS ${PAYMENT_EVENT_TABLE}`);
         expect(sql[1]).toContain(`CREATE TABLE IF NOT EXISTS ${FUNNEL_EVENT_TABLE}`);
         expect(sql[2]).toContain('CREATE TABLE IF NOT EXISTS checkout_guard_state');
+        expect(sql[3]).toContain(`CREATE TABLE IF NOT EXISTS ${COUNTER_TABLE}`);
+        expect(sql[3]).toContain('PRIMARY KEY (day, name)');
         for (const k of ['failed', 'client_declined', 'orphan', 'amount_drift', 'hold_expired', 'bank_expired']) {
             expect(sql[0]).toContain(`'${k}'`);
         }

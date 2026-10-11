@@ -1,5 +1,6 @@
 import type { Order, OrderByCodeAccessStrategy, RequestContext } from '@vendure/core';
 import { hashSessionToken, hashesEqual, parseDuration, readStoredSessionHash } from './session-hash';
+import { bumpCounter } from './counters';
 
 export interface SessionBoundOrderAccessOptions {
     /**
@@ -43,7 +44,14 @@ export class SessionBoundOrderByCodeAccessStrategy implements OrderByCodeAccessS
 
     canAccessOrder(ctx: RequestContext, order: Order): boolean {
         if (!order) return false;
+        const allowed = this.decide(ctx, order);
+        // Every refusal of an existing order is a lookup the default strategy
+        // would have answered — counted (no PII) for the dashboard and digest.
+        if (!allowed) bumpCounter('order_access_denied');
+        return allowed;
+    }
 
+    private decide(ctx: RequestContext, order: Order): boolean {
         if (ctx.activeUserId !== undefined && ctx.activeUserId !== null) {
             const ownerId = order.customer?.user?.id;
             return ownerId !== undefined && ownerId !== null && String(ownerId) === String(ctx.activeUserId);

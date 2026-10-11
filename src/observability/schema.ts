@@ -10,6 +10,9 @@ export const PAYMENT_EVENT_TABLE = 'checkout_guard_payment_event';
 export const FUNNEL_EVENT_TABLE = 'checkout_guard_funnel_event';
 /** Small key/value table shared by server and worker (reconciliation last-run). */
 export const STATE_TABLE = 'checkout_guard_state';
+/** Per-day counters for events that have no row of their own (rate-limit
+ *  rejections, session-bound order lookups refused). */
+export const COUNTER_TABLE = 'cg_counter';
 
 export async function ensureObservabilitySchema(db: DbAdapter): Promise<void> {
     await db.query(`
@@ -54,6 +57,14 @@ export async function ensureObservabilitySchema(db: DbAdapter): Promise<void> {
             k VARCHAR(64) PRIMARY KEY,
             v TEXT NOT NULL,
             updatedAt DATETIME(3) NOT NULL
+        )
+    `);
+    await db.query(`
+        CREATE TABLE IF NOT EXISTS ${COUNTER_TABLE} (
+            day DATE NOT NULL,
+            name VARCHAR(32) NOT NULL,
+            n INT NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, name)
         )
     `);
     // Vendure never indexes payment.transactionId or (state, method), yet the

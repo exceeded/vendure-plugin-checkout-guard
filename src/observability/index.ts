@@ -3,7 +3,7 @@
  *
  * Wire into the plugin with:
  *   controllers: [ObservabilityController]
- *   providers:   [ObservabilityService, OpsAlertService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber]
+ *   providers:   [ObservabilityService, OpsAlertService, CounterService, ReconciliationService, AmountDriftSubscriber, BankExpirySubscriber]
  * and from `CheckoutGuardPlugin.init()`:
  *   configureObservability({ getOptions: () => options, hasPremiumAccess: () => CheckoutGuardPlugin.hasPremiumAccess() });
  *
@@ -15,6 +15,7 @@
 export { ObservabilityController } from './observability.controller';
 export { ObservabilityService, isPaymentEventKind } from './observability.service';
 export { OpsAlertService, formatMinor } from './ops-alert.service';
+export { CounterService, dayKey } from './counter.service';
 export { ReconciliationService, ReconciliationRunResult, ReconciliationStatus } from './reconciliation.service';
 export { AmountDriftSubscriber } from './amount-drift.subscriber';
 export { BankExpirySubscriber } from './bank-expiry.subscriber';
@@ -25,8 +26,9 @@ export {
     ObservabilityOpsOptions,
     HOLD_METHOD_DEFAULT,
     BANK_METHOD_CODE,
+    holdMethodCode,
 } from './runtime';
-export { ensureObservabilitySchema, PAYMENT_EVENT_TABLE, FUNNEL_EVENT_TABLE } from './schema';
+export { ensureObservabilitySchema, PAYMENT_EVENT_TABLE, FUNNEL_EVENT_TABLE, COUNTER_TABLE } from './schema';
 export { summariseFunnel, funnelKey, isFunnelStep, FunnelRowLite } from './funnel';
 export { detectAmountDrift, AmountDriftInput, AmountDriftResult } from './amount-drift';
 export {
@@ -50,6 +52,7 @@ export {
     FunnelStepSummary,
     FunnelSummary,
     ObservabilitySummary,
+    UsageStats,
     StripeIntentLite,
     OrphanCandidate,
 } from './types';

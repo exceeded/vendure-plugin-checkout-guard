@@ -197,3 +197,24 @@ describe('stripGraphQlComments / rateLimitBucket', () => {
         expect(rateLimitBucket(null)).toBeNull();
     });
 });
+
+describe('usage counter', () => {
+    it('bumps rate_limit once per 429 and nothing when a request passes', async () => {
+        const { setCounterSink } = await import('./counters');
+        const seen: string[] = [];
+        setCounterSink(name => seen.push(name));
+        try {
+            const handler = createMutationRateLimitHandler({ limits: { applyCouponCode: { capacity: 1, windowMs: 60_000 } }, onLimited: () => undefined });
+            const body = { query: 'mutation { applyCouponCode(couponCode: "X") { __typename } }' };
+            const req = (ip: string) => ({ method: 'POST', body, headers: {}, ip, socket: { remoteAddress: ip } } as any);
+            const res = () => ({ status() { return this; }, setHeader() { return this; }, json() { return this; } } as any);
+            let passed = 0;
+            handler(req('203.0.113.9'), res(), () => { passed++; });
+            handler(req('203.0.113.9'), res(), () => { passed++; });
+            expect(passed).toBe(1);
+            expect(seen).toEqual(['rate_limit']);
+        } finally {
+            setCounterSink(null);
+        }
+    });
+});

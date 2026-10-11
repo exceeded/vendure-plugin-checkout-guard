@@ -68,6 +68,26 @@ interface SettingsSection {
     rows: Array<{ key: string; value: string }>;
 }
 
+interface SetupItemRow {
+    key: string;
+    label: string;
+    done: boolean;
+    hint: string;
+    tab?: string;
+    url?: string;
+}
+
+interface DigestSettings {
+    enabled: boolean;
+    recipient: string | null;
+    defaultRecipient: string | null;
+    lastSentAt: string | null;
+    nextDueAt: string | null;
+}
+
+/** localStorage flag: the admin hid the (complete) set-up checklist. */
+const SETUP_HIDDEN_KEY = 'hulo-vendure-plugin-checkout-guard-setup-hidden';
+
 const FUNNEL_STEPS: Array<{ key: string; label: string }> = [
     { key: 'cart', label: 'Cart' },
     { key: 'address', label: 'Address' },
@@ -175,6 +195,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                     <a href="https://huloglobal.com/vendure-plugins/checkout-guard/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
+            <div class="notice-strip" *ngIf="meta.notice?.message">{{ meta.notice.message }}</div>
         </vdr-page-block>
         <vdr-page-block *ngIf="meta && !meta.licensed">
             <div class="update-banner major" *ngIf="meta.tier === 'trial'">
@@ -185,6 +206,8 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                     </ng-container>
                     <ng-template #evalNoClock>everything is enabled — Stripe holds, bank-transfer auto-expiry, reconciliation, drift guard and ops alerts included.</ng-template>
                     Afterwards the plugin drops to the free tier.
+                    <div class="banner-line" *ngIf="meta.premiumFeatures?.length"><strong>Included now:</strong> {{ meta.premiumFeatures.join(' · ') }}</div>
+                    <div class="banner-line" *ngIf="meta.recentStats?.length"><strong>So far:</strong> {{ statsLine() }}</div>
                 </div>
                 <div class="actions eval-actions">
                     <select [(ngModel)]="buyPlan" [disabled]="buying" class="plan-select"><option value="monthly">Monthly · 14-day free trial</option><option value="annual">Annual · 14-day free trial, 2 months free</option><option value="lifetime">Lifetime · one-off</option></select>
@@ -193,10 +216,19 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                     <a href="https://huloglobal.com/vendure-plugins/checkout-guard/" target="_blank" class="gbtn gbtn-outline gbtn-sm">Details ↗</a>
                 </div>
             </div>
+            <div class="update-banner" style="margin-top:8px" *ngIf="meta.tier === 'trial'">
+                <div><strong>📧 Email me before it ends</strong> — one reminder a few days before the evaluation finishes, nothing else.</div>
+                <div class="actions eval-actions">
+                    <input class="eval-email" type="email" placeholder="you@example.com" [(ngModel)]="remindEmail" [disabled]="reminding || remindSent">
+                    <button class="gbtn gbtn-outline gbtn-sm" (click)="remindMe()" [disabled]="reminding || remindSent || !remindEmail">{{ remindSent ? 'Reminder set ✓' : (reminding ? 'Saving…' : 'Remind me') }}</button>
+                </div>
+            </div>
             <div class="update-banner major" *ngIf="meta.tier !== 'trial'">
                 <div>
                     <strong>🔓 Free tier</strong> — session-bound order lookup, trusted client IP, rate limits, funnel events and the bank-transfer method stay active. Stripe holds, bank-transfer auto-expiry and reminders, failed-payment recording, Stripe reconciliation, the amount-drift guard and ops alerts need a licence.
                     Start your <strong>14-day free trial</strong> below (card required, nothing charged until day 15, cancel any time) or buy a lifetime licence.
+                    <div class="banner-line" *ngIf="meta.premiumFeatures?.length"><strong>With a licence:</strong> {{ meta.premiumFeatures.join(' · ') }}</div>
+                    <div class="banner-line" *ngIf="meta.recentStats?.length"><strong>{{ meta.eval?.source === 'server' ? 'During your evaluation:' : 'So far:' }}</strong> {{ statsLine() }}</div>
                 </div>
                 <div class="actions">
                     <select [(ngModel)]="buyPlan" [disabled]="buying" class="plan-select"><option value="monthly">Monthly</option><option value="annual">Annual (2 months free)</option><option value="lifetime">Lifetime</option></select>
@@ -212,6 +244,7 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                     <button class="gbtn gbtn-primary gbtn-sm" (click)="activateLicence()" [disabled]="activating || !licenceKeyInput">{{ activating ? 'Verifying…' : 'Activate' }}</button>
                 </div>
             </div>
+            <div class="notice-strip" *ngIf="meta.notice?.message">{{ meta.notice.message }}</div>
         </vdr-page-block>
         <vdr-page-block *ngIf="updateAvailable()">
             <div class="update-banner">
@@ -251,6 +284,28 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
 
         <!-- ============================================================ OVERVIEW -->
         <ng-container *ngIf="tab === 'overview'">
+            <vdr-page-block *ngIf="setupVisible()">
+                <div class="card setup-card">
+                    <div class="card-block">
+                        <div class="row-between">
+                            <h3 class="step-title">Set-up checklist <small>{{ setupDoneCount() }} of {{ setup.items.length }} done</small></h3>
+                            <a href="javascript:void(0)" class="link-more" (click)="hideSetup()">Hide</a>
+                        </div>
+                        <ul class="feature-list">
+                            <li *ngFor="let it of setup.items; trackBy: trackByKey">
+                                <span class="status-dot" [class.on]="it.done"></span>
+                                <div class="setup-item">
+                                    <strong>{{ it.label }}</strong>
+                                    <span class="hint-inline">{{ it.hint }}</span>
+                                    <a *ngIf="!it.done && it.tab" href="javascript:void(0)" class="link-more" (click)="openTab(it.tab)">Open {{ it.tab }} →</a>
+                                    <a *ngIf="!it.done && it.url && it.url.startsWith('/')" class="link-more" [routerLink]="it.url">Open →</a>
+                                    <a *ngIf="!it.done && it.url && !it.url.startsWith('/')" class="link-more" [href]="it.url" target="_blank">Open ↗</a>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </vdr-page-block>
             <vdr-page-block>
                 <div class="kpi-row">
                     <div class="kpi" [class.kpi-alert]="kpi('holdsPending') > 0">
@@ -282,6 +337,21 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                         <div class="kpi-label">Funnel drop-off</div>
                         <div class="kpi-num">{{ dropOffLabel() }}</div>
                         <div class="kpi-sub"><a href="javascript:void(0)" (click)="go('funnel')">cart → placed, 7 days →</a></div>
+                    </div>
+                    <div class="kpi">
+                        <div class="kpi-label">Held value</div>
+                        <div class="kpi-num">{{ heldValueLabel() }}</div>
+                        <div class="kpi-sub">{{ usage('holdsPlaced30d') }} hold{{ usage('holdsPlaced30d') === 1 ? '' : 's' }} placed, last 30 days</div>
+                    </div>
+                    <div class="kpi">
+                        <div class="kpi-label">Rate-limit rejections</div>
+                        <div class="kpi-num">{{ usage('rateLimitRejections7d') }}</div>
+                        <div class="kpi-sub">checkout mutations refused, 7 days</div>
+                    </div>
+                    <div class="kpi">
+                        <div class="kpi-label">Denied order lookups</div>
+                        <div class="kpi-num">{{ usage('orderAccessDenied7d') }}</div>
+                        <div class="kpi-sub">session-bound orderByCode, 7 days</div>
                     </div>
                 </div>
             </vdr-page-block>
@@ -539,14 +609,29 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                         <h3 class="step-title">How to configure</h3>
                         <p class="hint">Register the plugin with the options you need. Every option is optional except <code class="mono">publicBaseUrl</code>.</p>
 <pre class="code-block">{{ configExample }}</pre>
-                        <div class="subsection-title">Checklist</div>
-                        <ul class="feature-list">
-                            <li><span class="status-dot" [class.on]="flag('stripe', 'webhookSecretConfigured')"></span> Point a Stripe webhook at <code class="mono">{{ publicBaseUrl() }}/checkout-guard/stripe-webhook</code> for <code class="mono">payment_intent.amount_capturable_updated</code> and <code class="mono">payment_intent.payment_failed</code>, and set its signing secret.</li>
-                            <li><span class="status-dot on"></span> Create a payment method per channel with the <code class="mono">stripe-hold</code> handler (it reads the channel's Stripe key from the regular Stripe payment method).</li>
-                            <li><span class="status-dot on"></span> Create a payment method with the <code class="mono">bank-transfer</code> handler and the <code class="mono">bank-transfer-eligibility</code> checker; the storefront reads the account details from <code class="mono">payments[].metadata.public</code>.</li>
-                            <li><span class="status-dot" [class.on]="flag('trustedClientIp', 'secretConfigured')"></span> Set <code class="mono">orderOptions.orderByCodeAccessStrategy = new SessionBoundOrderByCodeAccessStrategy('2h')</code> and have the storefront's server-side proxy send <code class="mono">x-real-client-ip</code> together with the proxy secret header.</li>
-                            <li><span class="status-dot" [class.on]="opsConfigured()"></span> Connect at least one ops channel (Slack, Discord, Teams, Telegram, webhook or email via <code class="mono">SMTP_*</code>) so orphaned charges, drift and failed captures reach a person.</li>
-                        </ul>
+                        <p class="hint">The set-up checklist (webhook secret, payment methods, trusted proxy, ops channel) is on the <a href="javascript:void(0)" (click)="go('overview')">Overview</a> tab. Remember to set <code class="mono">orderOptions.orderByCodeAccessStrategy = new SessionBoundOrderByCodeAccessStrategy('2h')</code> in the host config — the plugin cannot check that for you.</p>
+                    </div>
+                </div>
+            </vdr-page-block>
+            <vdr-page-block>
+                <div class="card">
+                    <div class="card-block">
+                        <h3 class="step-title">Weekly report <small>Monday 08:00, server time</small></h3>
+                        <p class="hint">One e-mail a week with what Checkout Guard did for your store — holds placed and captured, held value, bank transfers confirmed, rate-limited abuse, orphaned charges — and the next set-up step. It is sent through the host's <code class="mono">SMTP_SERVER</code> / <code class="mono">SMTP_USER</code> / <code class="mono">SMTP_PASSWORD</code> settings, the same ones the ops e-mails use.</p>
+                        <ng-container *ngIf="digest; else digestLoading">
+                            <div class="digest-row">
+                                <label class="digest-toggle"><input type="checkbox" [(ngModel)]="digest.enabled" (ngModelChange)="saveDigest({ enabled: $event })" [disabled]="digestSaving"> Send the weekly report</label>
+                                <input class="form-input" type="email" [(ngModel)]="digestRecipient" [placeholder]="digest.defaultRecipient ? 'Defaults to ' + digest.defaultRecipient : 'Recipient e-mail'" [disabled]="digestSaving" style="min-width:260px">
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="saveDigest({ recipient: digestRecipient })" [disabled]="digestSaving">{{ digestSaving ? 'Saving…' : 'Save recipient' }}</button>
+                                <button class="gbtn gbtn-primary gbtn-sm" (click)="sendDigestTest()" [disabled]="digestSending">{{ digestSending ? 'Sending…' : 'Send me a test' }}</button>
+                                <button class="gbtn gbtn-outline gbtn-sm" (click)="previewDigest()" [disabled]="digestPreviewing">{{ digestPreviewing ? 'Opening…' : 'Preview' }}</button>
+                            </div>
+                            <p class="hint">
+                                Last sent {{ digest.lastSentAt ? (digest.lastSentAt | date: 'd MMM yyyy, HH:mm') : 'never' }} · next {{ digest.nextDueAt ? (digest.nextDueAt | date: 'd MMM yyyy, HH:mm') : (digest.enabled ? '—' : 'off') }}
+                                <span *ngIf="digest.enabled && !digest.recipient && !digest.defaultRecipient"> · <span class="warn-inline">no recipient yet — set <code class="mono">ops.adminEmail</code> or enter one above</span></span>
+                            </p>
+                        </ng-container>
+                        <ng-template #digestLoading><p class="hint">{{ digestError || 'Loading…' }}</p></ng-template>
                     </div>
                 </div>
             </vdr-page-block>
@@ -563,6 +648,8 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
                                 <tr><td class="mono small">GET /checkout-guard/holds · POST …/:paymentId/capture | cancel</td><td>Admin</td><td>This page's Holds tab</td></tr>
                                 <tr><td class="mono small">GET /checkout-guard/bank-transfers · POST …/:paymentId/received | cancel</td><td>Admin</td><td>This page's Bank transfers tab</td></tr>
                                 <tr><td class="mono small">GET /checkout-guard/events · /summary · /funnel/summary</td><td>Admin</td><td>Overview, events and funnel</td></tr>
+                                <tr><td class="mono small">GET /checkout-guard/setup · /widget</td><td>Admin</td><td>Set-up checklist and the dashboard widget</td></tr>
+                                <tr><td class="mono small">GET|POST /checkout-guard/digest/settings · POST …/send-test · GET …/preview</td><td>Admin</td><td>Weekly report</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -813,6 +900,18 @@ const SETTINGS_SECTIONS: Array<{ key: string; title: string }> = [
         .update-banner .actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         .eval-actions { align-items: center; }
         .eval-email { padding: 5px 9px; border: 1px solid var(--gb-ui-border); border-radius: 7px; font-size: 12.5px; min-width: 190px; background: #fff; color: #0f172a; }
+        .banner-line { margin-top: 6px; font-size: 12.5px; color: var(--gb-strong); line-height: 1.45; }
+        .notice-strip {
+            margin-top: 8px; padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+            background: var(--gb-tint-warn); border: 1px solid var(--gb-line-warn); border-left: 4px solid var(--gb-amber); color: var(--gb-strong);
+        }
+
+        /* ── Set-up checklist + weekly report ─────────────────────── */
+        .setup-card { border-left: 4px solid var(--gb-amber); }
+        .setup-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .hint-inline { font-size: 12px; color: var(--gb-muted); line-height: 1.45; }
+        .digest-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 8px; }
+        .digest-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--gb-strong); margin-right: 6px; cursor: pointer; }
 
         @media (prefers-reduced-motion: reduce) {
             .gbtn, .tab, .seg { transition: none; }
@@ -862,6 +961,23 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     settingsLoading = false;
     settingsError = '';
 
+    /** Set-up checklist (Overview). Hidden by the admin only while every item is done. */
+    setup: { items: SetupItemRow[]; complete: boolean } | null = null;
+    private setupHidden = false;
+
+    /** Trial reminder ("Email me before it ends"). */
+    remindEmail = '';
+    reminding = false;
+    remindSent = false;
+
+    /** Weekly report card (Settings). */
+    digest: DigestSettings | null = null;
+    digestRecipient = '';
+    digestSaving = false;
+    digestSending = false;
+    digestPreviewing = false;
+    digestError = '';
+
     /** Rendered through interpolation: Angular would otherwise read the braces as ICU expressions. */
     readonly configExample = `CheckoutGuardPlugin.init({
     publicBaseUrl: 'https://shop.example.com',
@@ -899,6 +1015,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     ) {}
 
     ngOnInit() {
+        try { this.setupHidden = localStorage.getItem(SETUP_HIDDEN_KEY) === '1'; } catch { this.setupHidden = false; }
         this.checkClaim(false);
         this.reloadAll();
     }
@@ -915,6 +1032,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
         this.loadMeta();
         this.loadSummary();
         this.loadRecentEvents();
+        this.loadSetup();
         this.loadTab(this.tab);
     }
 
@@ -990,6 +1108,7 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     }
 
     loadSettings() {
+        this.loadDigest();
         if (this.settings && !this.settingsError) { this.cdr.markForCheck(); return; }
         this.settingsLoading = true;
         this.settingsError = '';
@@ -1004,6 +1123,127 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
                     : this.errMsg(e, 'Could not load the settings');
                 this.cdr.markForCheck();
             },
+        }));
+    }
+
+    // ── Set-up checklist ─────────────────────────────────────────────
+
+    private loadSetup() {
+        this.subs.add(this.http.get<any>(`${API}/setup`).subscribe({
+            next: r => { this.setup = r && Array.isArray(r.items) ? { items: r.items, complete: !!r.complete } : null; this.cdr.markForCheck(); },
+            error: () => undefined,
+        }));
+    }
+
+    /** Shown while something is undone; once complete it stays only until the admin hides it. */
+    setupVisible(): boolean {
+        if (!this.setup || !this.setup.items.length) return false;
+        if (!this.setup.complete) return true;
+        return !this.setupHidden;
+    }
+
+    setupDoneCount(): number { return this.setup ? this.setup.items.filter(i => i.done).length : 0; }
+
+    hideSetup() {
+        this.setupHidden = true;
+        try { localStorage.setItem(SETUP_HIDDEN_KEY, '1'); } catch { /* private mode */ }
+        this.cdr.markForCheck();
+    }
+
+    openTab(tab: string) {
+        if (tab === 'overview' || tab === 'holds' || tab === 'bank' || tab === 'events' || tab === 'funnel' || tab === 'settings') this.go(tab);
+    }
+
+    trackByKey(_: number, r: { key?: string }) { return r?.key ?? _; }
+
+    // ── Trial reminder ───────────────────────────────────────────────
+
+    remindMe() {
+        const email = (this.remindEmail || '').trim();
+        if (!email || this.reminding) return;
+        this.reminding = true;
+        this.subs.add(this.http.post<any>(`${API}/eval/remind-me`, { email }).subscribe({
+            next: () => { this.reminding = false; this.remindSent = true; this.notification.success('We will email you before the evaluation ends'); this.cdr.markForCheck(); },
+            error: e => { this.reminding = false; this.notification.error(this.errMsg(e, 'Could not save the reminder — check the address')); this.cdr.markForCheck(); },
+        }));
+    }
+
+    /** "£1,234.56 held on customers' cards · 12 Stripe holds placed · …" from the server-formatted stats. */
+    statsLine(): string {
+        const rows: Array<{ label: string; value: string }> = this.meta?.recentStats || [];
+        return rows.map(r => `${r.value} ${r.label}`).join(' · ');
+    }
+
+    // ── Value metrics ────────────────────────────────────────────────
+
+    usage(key: string): number {
+        const v = this.dig(this.summary, `usage.${key}`);
+        return typeof v === 'number' && isFinite(v) ? v : 0;
+    }
+
+    heldValueLabel(): string {
+        const minor = this.dig(this.summary, 'usage.heldValueMinor30d');
+        if (typeof minor !== 'number') return '—';
+        return this.money(minor, this.dig(this.summary, 'usage.heldCurrency') || null);
+    }
+
+    // ── Weekly report ────────────────────────────────────────────────
+
+    private loadDigest() {
+        this.digestError = '';
+        this.subs.add(this.http.get<DigestSettings>(`${API}/digest/settings`).subscribe({
+            next: d => { this.digest = d; this.digestRecipient = d?.recipient || ''; this.cdr.markForCheck(); },
+            error: e => { this.digest = null; this.digestError = this.errMsg(e, 'Could not load the weekly report settings'); this.cdr.markForCheck(); },
+        }));
+    }
+
+    saveDigest(patch: { enabled?: boolean; recipient?: string | null }) {
+        if (this.digestSaving) return;
+        this.digestSaving = true;
+        const body = { ...patch };
+        if (body.recipient !== undefined) body.recipient = (body.recipient || '').trim() || null;
+        this.subs.add(this.http.post<DigestSettings>(`${API}/digest/settings`, body).subscribe({
+            next: d => {
+                this.digestSaving = false;
+                this.digest = d;
+                this.digestRecipient = d?.recipient || '';
+                this.notification.success(body.recipient !== undefined ? (d?.recipient ? `Weekly report goes to ${d.recipient}` : 'Recipient cleared — the default address is used') : (d?.enabled ? 'Weekly report on' : 'Weekly report off'));
+                this.cdr.markForCheck();
+            },
+            error: e => { this.digestSaving = false; this.notification.error(this.errMsg(e, 'Could not save the weekly report settings')); this.loadDigest(); this.cdr.markForCheck(); },
+        }));
+    }
+
+    sendDigestTest() {
+        if (this.digestSending) return;
+        this.digestSending = true;
+        const to = (this.digestRecipient || '').trim();
+        this.subs.add(this.http.post<any>(`${API}/digest/send-test`, to ? { to } : {}).subscribe({
+            next: r => {
+                this.digestSending = false;
+                if (r?.sent) this.notification.success(`Test report sent to ${r.to}`);
+                else if (r?.reason === 'no-recipient') this.notification.error('No recipient: enter an address above or set ops.adminEmail');
+                else this.notification.error(`Not sent: ${r?.reason || 'unknown error'}`);
+                this.loadDigest();
+                this.cdr.markForCheck();
+            },
+            error: e => { this.digestSending = false; this.notification.error(this.errMsg(e, 'Could not send the test report')); this.cdr.markForCheck(); },
+        }));
+    }
+
+    /** Fetched through the same authenticated HttpClient (bearer or cookie) and opened as a Blob URL. */
+    previewDigest() {
+        if (this.digestPreviewing) return;
+        this.digestPreviewing = true;
+        this.subs.add(this.http.get(`${API}/digest/preview`, { responseType: 'text' }).subscribe({
+            next: html => {
+                this.digestPreviewing = false;
+                const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+                window.open(url, '_blank', 'noopener');
+                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                this.cdr.markForCheck();
+            },
+            error: e => { this.digestPreviewing = false; this.notification.error(this.errMsg(e, 'Could not build the preview')); this.cdr.markForCheck(); },
         }));
     }
 
@@ -1347,6 +1587,10 @@ export class CheckoutGuardComponent implements OnInit, OnDestroy {
     }
 
     private errMsg(e: any, fallback: string): string {
+        const code = e?.error?.error;
+        if (e?.status === 402 || code === 'licence-required' || code === 'licence_required' || code === 'premium-feature' || code === 'premium_required') {
+            return `${fallback.replace(/^Could not /, '').replace(/^The action failed$/, 'This action')} needs a licence — start the free trial or activate a key at the top of this page.`;
+        }
         return e?.error?.message || e?.message || fallback;
     }
 }

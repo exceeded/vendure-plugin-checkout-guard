@@ -79,6 +79,35 @@ export class OpsAlertService {
         }
     }
 
+    /** True when `SMTP_SERVER` + `SMTP_USER` are present (the e-mail path can send). */
+    hasSmtp(): boolean { return !!this.smtp(); }
+
+    /** The merchant address ops e-mails go to (`ops.adminEmail`), or null. */
+    adminEmail(): string | null { return (runtimeOptions().ops?.adminEmail || '').trim() || null; }
+
+    /**
+     * Send one plain message through the same pooled SMTP transport the
+     * alerts use (weekly report, test sends). Throws when SMTP or
+     * nodemailer is unavailable so the caller can report "not sent".
+     */
+    async sendMail(to: string, mail: { subject: string; text: string; html?: string }): Promise<void> {
+        const smtp = this.smtp();
+        if (!smtp) throw new Error('SMTP_SERVER / SMTP_USER are not set');
+        let nodemailer: any;
+        try { nodemailer = await import('nodemailer'); } catch { throw new Error('the "nodemailer" package is not installed on the host'); }
+        try {
+            const transporter = transportFor(nodemailer, smtp);
+            await Promise.race([
+                transporter.sendMail({ from: smtp.from, to, subject: mail.subject, text: mail.text, html: mail.html }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('smtp timeout (12 s)')), 12_000)),
+            ]);
+        } catch (e) {
+            try { transportCache?.t?.close?.(); } catch { /* ignore */ }
+            transportCache = null;
+            throw e;
+        }
+    }
+
     private smtp(): SmtpSettings | null {
         if (process.env.SMTP_SERVER && process.env.SMTP_USER) {
             return {

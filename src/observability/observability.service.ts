@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Logger, TransactionalConnection } from '@vendure/core';
 import { adapterFor, DbAdapter } from '@huloglobal/vendure-licence-sdk';
+import { CounterService } from './counter.service';
 import { summariseFunnelCounts } from './funnel';
 import { ensureObservabilitySchema, FUNNEL_EVENT_TABLE, PAYMENT_EVENT_TABLE } from './schema';
 import { BANK_METHOD_CODE, hasPremium, holdMethodCode, loggerCtx, noteLocked } from './runtime';
@@ -13,6 +14,7 @@ import {
     PaymentEventKind,
     PaymentEventRow,
     PREMIUM_EVENT_KINDS,
+    UsageStats,
 } from './types';
 
 const MAX_DAYS = 365;
@@ -59,7 +61,7 @@ export function isPaymentEventKind(v: unknown): v is PaymentEventKind {
  */
 @Injectable()
 export class ObservabilityService implements OnModuleInit {
-    constructor(private connection: TransactionalConnection) {}
+    constructor(private connection: TransactionalConnection, private counters?: CounterService) {}
 
     private get db(): DbAdapter {
         return adapterFor(this.connection.rawConnection);
@@ -367,6 +369,63 @@ export class ObservabilityService implements OnModuleInit {
             [d], { needAffected: true },
         ).catch(() => null);
         return Number(r?.affectedRows || 0);
+    }
+
+    // ── Usage stats (digest, heartbeat, evaluation, widget) ──────────
+
+    /**
+     * Numbers only, no PII, for the window `[from, to)`. Holds are the
+     * payments of every method using the `stripe-hold` handler: placed by
+     * `createdAt`, captured (Settled) and released (Cancelled) by `updatedAt`.
+     * `heldValuePence` is the minor-unit sum of the holds placed;
+     * `heldCurrency` is the currency when every hold shares one (else null).
+     */
+    async usageStats(from: Date, to: Date): Promise<UsageStats> {
+        const out: UsageStats = {
+            holdsPlaced: 0, holdsCaptured: 0, holdsCancelled: 0, heldValuePence: 0,
+            bankTransfersConfirmed: 0, rateLimitRejections: 0, orderAccessDenied: 0, orphansFound: 0,
+            heldCurrency: null,
+        };
+        const codes = await this.methodCodesForHandler(holdMethodCode());
+        if (codes.length) {
+            const ph = codes.map(() => '?').join(',');
+            const [placed] = await this.db.query(
+                `SELECT COUNT(*) AS placed, COALESCE(SUM(p.amount), 0) AS held,
+                        COUNT(DISTINCT o.\`currencyCode\`) AS currencies, MIN(o.\`currencyCode\`) AS currency
+                 FROM payment p
+                 JOIN \`order\` o ON o.id = p.\`orderId\`
+                 WHERE p.method IN (${ph}) AND p.\`createdAt\` >= ? AND p.\`createdAt\` < ?`,
+                [...codes, from, to],
+            ).catch(() => [null]);
+            out.holdsPlaced = Number(placed?.placed || 0);
+            out.heldValuePence = Math.round(Number(placed?.held || 0));
+            out.heldCurrency = Number(placed?.currencies || 0) === 1 && placed?.currency ? String(placed.currency) : null;
+            const [outcome] = await this.db.query(
+                `SELECT SUM(CASE WHEN p.state = 'Settled' THEN 1 ELSE 0 END) AS captured,
+                        SUM(CASE WHEN p.state = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled
+                 FROM payment p
+                 WHERE p.method IN (${ph}) AND p.\`updatedAt\` >= ? AND p.\`updatedAt\` < ?`,
+                [...codes, from, to],
+            ).catch(() => [null]);
+            out.holdsCaptured = Number(outcome?.captured || 0);
+            out.holdsCancelled = Number(outcome?.cancelled || 0);
+        }
+        const [bank] = await this.db.query(
+            `SELECT COUNT(*) AS n FROM checkout_guard_bank_transfer WHERE settledAt >= ? AND settledAt < ?`,
+            [from, to],
+        ).catch(() => [null]);
+        out.bankTransfersConfirmed = Number(bank?.n || 0);
+        const [orphans] = await this.db.query(
+            `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE} WHERE kind = 'orphan' AND createdAt >= ? AND createdAt < ?`,
+            [from, to],
+        ).catch(() => [null]);
+        out.orphansFound = Number(orphans?.n || 0);
+        if (this.counters) {
+            const c = await this.counters.sums(from, to).catch(() => ({} as Record<string, number>));
+            out.rateLimitRejections = c.rate_limit || 0;
+            out.orderAccessDenied = c.order_access_denied || 0;
+        }
+        return out;
     }
 
     // ── Dashboard KPIs ───────────────────────────────────────────────

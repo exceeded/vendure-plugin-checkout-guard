@@ -140,10 +140,23 @@ export class ObservabilityController {
     async summary(@Ctx() ctx: RequestContext, @Res() res: Response, @Query() q: any) {
         if (denyUnlessAdmin(ctx, res, false)) return;
         const summary = await this.service.summary(this.scopedChannel(ctx, q?.channelId));
+        const now = new Date();
+        const [u30, u7] = await Promise.all([
+            this.service.usageStats(new Date(now.getTime() - 30 * 86_400_000), now).catch(() => null),
+            this.service.usageStats(new Date(now.getTime() - 7 * 86_400_000), now).catch(() => null),
+        ]);
         return res.json({
             ...summary,
             opsConfigured: this.ops.isConfigured(),
             reconciliation: await this.reconciliation.status(),
+            // Value metrics for the Overview tiles (store-wide: the counters carry no channel).
+            usage: {
+                heldValueMinor30d: u30?.heldValuePence ?? 0,
+                heldCurrency: u30?.heldCurrency ?? null,
+                holdsPlaced30d: u30?.holdsPlaced ?? 0,
+                rateLimitRejections7d: u7?.rateLimitRejections ?? 0,
+                orderAccessDenied7d: u7?.orderAccessDenied ?? 0,
+            },
         });
     }
 

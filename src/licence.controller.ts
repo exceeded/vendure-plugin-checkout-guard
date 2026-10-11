@@ -5,7 +5,7 @@ const loggerCtx = 'CheckoutGuard';
 import { Response } from 'express';
 import { describeLicence, evalInstanceId, performSelfUpdate, selfUpdateEnv } from '@huloglobal/vendure-licence-sdk';
 import { CheckoutGuardPlugin, getOptions } from './plugin';
-import { CheckoutGuardService } from './checkout-guard.service';
+import { CheckoutGuardService, PLUGIN_ID } from './checkout-guard.service';
 import { effectiveStripeHoldOptions } from './stripe-hold';
 import { getBankTransferRuntime } from './bank-transfer';
 import { DEFAULT_MUTATION_RATE_LIMITS, DEFAULT_TRUSTED_CLIENT_IP_HEADER, DEFAULT_TRUSTED_CLIENT_IP_SECRET_HEADER, resolveMutationRateLimits } from './guards';
@@ -34,6 +34,8 @@ export class CheckoutGuardLicenceController {
         if (denyUnlessAdmin(ctx, res, false)) return;
         const updater = CheckoutGuardPlugin.getUpdateChecker();
         const licence = CheckoutGuardPlugin.getLicenceStatus();
+        let extras: Awaited<ReturnType<CheckoutGuardService['licenceExtras']>> | null = null;
+        try { extras = await this.service.licenceExtras(); } catch { extras = null; }
         return res.json({
             name: CheckoutGuardPlugin.getPackageName(),
             version: CheckoutGuardPlugin.getPackageVersion(),
@@ -44,7 +46,75 @@ export class CheckoutGuardLicenceController {
             licenceMessage: licence?.valid ? '' : (licence?.message || 'No licence key configured'),
             tier: licence?.valid ? 'paid' : (CheckoutGuardPlugin.getEvalState()?.active ? 'trial' : 'free'),
             eval: CheckoutGuardPlugin.getEvalState(),
+            notice: extras?.notice ?? null,
+            premiumFeatures: extras?.premiumFeatures ?? [],
+            recentStats: extras?.recentStats ?? [],
+            buyUrl: extras?.buyUrl ?? `https://elite.charity/licence/buy/${PLUGIN_ID}`,
         });
+    }
+
+    /** Setup checklist (real checks) for the Overview card and the digest tips. */
+    @Get('setup')
+    async setup(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        try {
+            return res.json(await this.service.setup());
+        } catch (e: any) {
+            Logger.warn(`Setup checklist failed: ${e?.message || e}`, loggerCtx);
+            return res.json({ items: [], complete: true });
+        }
+    }
+
+    /** Three headline figures (7 days) for the dashboard widget. */
+    @Get('widget')
+    async widget(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        try {
+            return res.json(await this.service.widget());
+        } catch (e: any) {
+            Logger.warn(`Widget payload failed: ${e?.message || e}`, loggerCtx);
+            return res.json({ tier: 'free', notice: null, stats: [], route: '/extensions/checkout-guard' });
+        }
+    }
+
+    // ── Weekly report ────────────────────────────────────────────────
+
+    @Get('digest/settings')
+    async digestSettings(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        return res.json(await this.service.digestSettings());
+    }
+
+    @Post('digest/settings')
+    async digestUpdate(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, 'superadmin')) return;
+        const patch: { enabled?: boolean; recipient?: string | null } = {};
+        if (typeof body?.enabled === 'boolean') patch.enabled = body.enabled;
+        if (body?.recipient !== undefined) patch.recipient = body.recipient === null ? null : String(body.recipient).slice(0, 320);
+        try {
+            return res.json(await this.service.updateDigestSettings(patch));
+        } catch (e: any) {
+            return res.status(400).json({ message: e?.message || 'Invalid settings' });
+        }
+    }
+
+    @Post('digest/send-test')
+    async digestSendTest(@Ctx() ctx: RequestContext, @Res() res: Response, @Body() body: any) {
+        if (denyUnlessAdmin(ctx, res, true)) return;
+        const to = String(body?.to || '').trim().slice(0, 320);
+        if (to && !/^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,}$/.test(to)) return res.status(400).json({ message: 'Enter a valid email address' });
+        const r = await this.service.digest.sendNow(to || null);
+        return res.json({ sent: r.sent, to: r.to, reason: r.reason, subject: r.preview.subject });
+    }
+
+    /** This week's report as HTML (opened in a new tab from the admin). */
+    @Get('digest/preview')
+    async digestPreview(@Ctx() ctx: RequestContext, @Res() res: Response) {
+        if (denyUnlessAdmin(ctx, res, false)) return;
+        const mail = await this.service.digestPreview();
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(mail.html);
     }
 
     /** Effective options as the plugin sees them (secrets redacted). */
@@ -162,6 +232,8 @@ export class CheckoutGuardLicenceController {
                 signal: AbortSignal.timeout(8_000),
             });
             if (!resp.ok) return res.status(502).json({ error: 'upstream', status: resp.status });
+            // Remembered as the fallback recipient of the weekly report.
+            await this.service.prefs.set('eval.leadEmail', email.toLowerCase());
             return res.json({ ok: true });
         } catch {
             return res.status(502).json({ error: 'unreachable' });

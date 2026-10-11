@@ -4,6 +4,7 @@ import { Channel, Logger, PaymentMethod, ProcessContext, TransactionalConnection
 import { adapterFor } from '@huloglobal/vendure-licence-sdk';
 import { withDbLock } from '../db-lock';
 import { ObservabilityService } from './observability.service';
+import { CounterService } from './counter.service';
 import { STATE_TABLE } from './schema';
 import { formatMinor, OpsAlertService } from './ops-alert.service';
 import { findOrphanIntents, listStripePaymentIntents } from './reconciliation';
@@ -66,6 +67,7 @@ export class ReconciliationService {
         private processContext: ProcessContext,
         private events: ObservabilityService,
         private ops: OpsAlertService,
+        private counters?: CounterService,
     ) {}
 
     lookbackDays(): number {
@@ -121,6 +123,7 @@ export class ReconciliationService {
             const locked = await withDbLock(this.connection.rawConnection, 'prune', async () => {
                 const funnel = await this.events.pruneFunnel(90);
                 const events = await this.events.prunePaymentEvents(180, 400);
+                if (this.counters) await this.counters.prune(400).catch(() => 0);
                 return { funnel, events };
             });
             if (locked.acquired && locked.result && (locked.result.funnel || locked.result.events)) {

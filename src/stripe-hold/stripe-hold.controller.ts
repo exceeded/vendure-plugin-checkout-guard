@@ -8,6 +8,7 @@ import { StripeSignatureError, verifyStripeSignature } from './stripe-signature'
 import { StripeHoldService } from './stripe-hold.service';
 
 const loggerCtx = 'CheckoutGuard:StripeHold';
+const BUY_URL = 'https://elite.charity/licence/buy/vendure-plugin-checkout-guard';
 
 function denyUnlessAdmin(ctx: RequestContext, res: Response, write: boolean): boolean {
     const needed = write ? [Permission.UpdateOrder] : [Permission.ReadOrder];
@@ -98,7 +99,7 @@ export class StripeHoldController {
     async capture(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('paymentId') paymentId: string) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
-        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required' });
+        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required', buyUrl: BUY_URL });
         const r = await this.service.capture(ctx, paymentId, 'admin');
         return res.status(r.ok ? 200 : this.statusFor(r.error)).json(r);
     }
@@ -107,7 +108,7 @@ export class StripeHoldController {
     async cancel(@Ctx() ctx: RequestContext, @Res() res: Response, @Param('paymentId') paymentId: string) {
         if (denyUnlessAdmin(ctx, res, true)) return;
         if (!/^\d{1,18}$/.test(paymentId)) return res.status(400).json({ ok: false, error: 'bad_payment_id' });
-        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required' });
+        if (!this.service.premium()) return res.status(402).json({ error: 'premium_required', buyUrl: BUY_URL });
         const r = await this.service.cancel(ctx, paymentId, 'admin');
         return res.status(r.ok ? 200 : this.statusFor(r.error)).json(r);
     }

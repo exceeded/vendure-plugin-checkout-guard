@@ -15,6 +15,8 @@
  */
 
 export { GUARDS_LOGGER_CTX } from './constants';
+export { bumpCounter, setCounterSink } from './counters';
+export type { CounterSink, GuardCounterName } from './counters';
 export {
     CG_SESSION_HASH_COLUMN,
     CG_SESSION_HASH_FIELD,

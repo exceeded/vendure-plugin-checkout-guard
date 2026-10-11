@@ -5,6 +5,58 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-10-11
+
+Merchant engagement release. Two small tables (`cg_counter`, and the shared
+`hulo_plugin_prefs`) are created on boot; nothing to migrate. Requires
+`@huloglobal/vendure-licence-sdk` 0.15.
+
+### Added
+- **Weekly report.** Monday 08:00 (server-local) e-mail from the worker with
+  the week's holds placed / captured / released, held value, bank transfers
+  confirmed, rate-limited requests, denied order lookups and orphaned
+  charges — each with the previous week for comparison — plus the next open
+  set-up step and, on trial/free, what a licence adds. Sent through the ops
+  SMTP settings (`SMTP_*`), falling back to the SDK env transport. Recipient
+  defaults to `ops.adminEmail`, then the licence customer, then the trial
+  reminder address. `GET|POST /checkout-guard/digest/settings`,
+  `POST /digest/send-test`, `GET /digest/preview`, and a *Weekly report* card
+  in the Settings tab (toggle, recipient, last/next, Send me a test, Preview).
+- **Set-up checklist** on the Overview tab (`GET /checkout-guard/setup`):
+  Stripe webhook secret, `stripe-hold` method, `bank-transfer` method,
+  trusted client IP (secret header or `trustedProxies`), ops channel — real
+  checks, with links to the fix. Hideable once complete; reappears if a check
+  regresses. Replaces the static checklist in Settings.
+- **Dashboard widget** (`registerDashboardWidget`, *Dashboard → Add widget →
+  Checkout Guard*): three 7-day headline figures, the licence notice and a
+  link to the page. `GET /checkout-guard/widget`.
+- **Usage counters.** `cg_counter` (day, name, n) records Shop API rate-limit
+  rejections and session-bound `orderByCode` refusals (fire-and-forget,
+  buffered, one upsert per counter every two seconds). New Overview tiles
+  *Held value (30d)*, *Rate-limit rejections (7d)* and *Denied order lookups
+  (7d)*; `summary` gains a `usage` block.
+- **Usage stats to the licence server.** `holdsPlaced`, `holdsCaptured`,
+  `holdsCancelled`, `heldValuePence`, `bankTransfersConfirmed`,
+  `rateLimitRejections`, `orderAccessDenied`, `orphansFound` (last 30 days,
+  numbers only) ride on the daily heartbeat and evaluation pings — licensed
+  installs keep reporting after purchase.
+- **Licence banner.** `meta` now carries `notice` (trial / key / evaluation
+  lifecycle sentence, shown as an amber strip), `premiumFeatures`,
+  `recentStats` ("So far: £… held on customers' cards · …") and `buyUrl`.
+  The trial banner gains "Email me before it ends" (wired to the existing
+  `eval/remind-me`; the address is remembered as the report's fallback
+  recipient). Every 402 and `licence_required` / `premium-feature` error in
+  the admin now reads "… needs a licence — start the free trial or activate a
+  key at the top of this page."
+
+### Changed
+- `402` bodies from the hold capture/cancel endpoints include `buyUrl`.
+- Retention cron also prunes `cg_counter` after 400 days.
+- `ReconciliationService` and `ObservabilityService` accept the new
+  `CounterService`; `OpsAlertService` exposes `sendMail()`, `hasSmtp()` and
+  `adminEmail()`.
+- Licence SDK dependency raised to `^0.15.0`.
+
 ## [0.1.4] — 2026-09-28
 
 Follow-up to the 0.1.3 audit. No schema changes; nothing to migrate.

@@ -34,7 +34,8 @@ yarn add @huloglobal/vendure-plugin-checkout-guard   # or npm install / pnpm add
 | **Bank transfer** | `bank-transfer` handler with the account details in the payment's **public metadata** (storefronts render them), eligibility checker (min / max, guests, customer groups), auto-expiry after N days, reminder event, admin *received* / *cancel*. |
 | **Guards** | Session-bound anonymous `orderByCode`; trusted client-IP contract for server-side proxies; token-bucket rate limits on checkout mutations. |
 | **Observability** | Payment-event log (failed, client-declined, orphan, amount drift, expired), nightly Stripe reconciliation per channel, amount-drift guard, checkout funnel events with drop-off, ops alerts (Slack / Discord / Teams / Telegram / signed webhook / email). |
-| **Admin dashboard** | *Sales → Checkout Guard*: Overview, Holds, Bank transfers, Payment events, Funnel, Settings, Licence & billing. |
+| **Admin dashboard** | *Sales → Checkout Guard*: Overview (set-up checklist, KPIs, value metrics), Holds, Bank transfers, Payment events, Funnel, Settings (weekly report), Licence & billing. Plus a dashboard widget. |
+| **Weekly report** | Monday 08:00 e-mail with the week's numbers (holds, held value, bank transfers, rate-limited abuse, denied lookups, orphans) and the next set-up step. |
 
 ## Install
 
@@ -69,16 +70,19 @@ export const config: VendureConfig = {
 ```
 
 Admin UI: add `CheckoutGuardPlugin.uiExtensions` to your `compileUiExtensions`
-list. The plugin adds an Order custom field `cgSessionHash` — run your
-migrations (or `synchronize`) after install:
+list. That registers the *Sales → Checkout Guard* page and the dashboard
+widget (**Dashboard → Add widget → Checkout Guard**). The plugin adds an Order
+custom field `cgSessionHash` — run your migrations (or `synchronize`) after
+install:
 
 ```sql
 ALTER TABLE `order` ADD `customFieldsCgsessionhash` varchar(64) NULL;
 ```
 
-Tables `checkout_guard_payment_event`, `checkout_guard_funnel_event` and
-`checkout_guard_bank_transfer` are created on boot (MySQL / MariaDB /
-PostgreSQL via the licence SDK's dialect adapter).
+Tables `checkout_guard_payment_event`, `checkout_guard_funnel_event`,
+`checkout_guard_bank_transfer`, `checkout_guard_state`, `cg_counter` and the
+shared `hulo_plugin_prefs` are created on boot (MySQL / MariaDB / PostgreSQL
+via the licence SDK's dialect adapter).
 
 ## Stripe holds
 
@@ -196,8 +200,61 @@ to both to email the customer. Mark money received from the dashboard.
 | POST | `/checkout-guard/funnel` | Public (rate limited) |
 | GET | `/checkout-guard/events?kind=&days=` · `/summary` · `/funnel/summary?days=` | Admin |
 | POST | `/checkout-guard/reconcile/run` | Admin |
-| GET | `/checkout-guard/meta` · `/settings` | Admin |
+| GET | `/checkout-guard/meta` · `/settings` · `/setup` · `/widget` | Admin |
+| GET/POST | `/checkout-guard/digest/settings`, POST `/digest/send-test`, GET `/digest/preview` | Admin |
+| POST | `/checkout-guard/eval/remind-me` | Admin |
 | POST | `/checkout-guard/licence/activate` · `/deactivate` · `/purchase-link` · `/portal-link`, GET `/licence/claim-status` | Admin |
+
+## Weekly report, setup checklist and dashboard widget
+
+**Weekly report.** Every Monday at 08:00 (server-local time) the worker
+e-mails one report covering the previous seven days, with the week before
+for comparison: Stripe holds placed, captured and released, the value held
+on customers' cards, bank transfers confirmed, abusive checkout requests
+rate-limited, `orderByCode` lookups refused to the wrong session, and
+orphaned charges found by reconciliation. Quiet weeks say so. The report
+also lists the next open set-up step and, on the trial or free tier, what a
+licence adds. Every figure is a real query over the plugin's own tables and
+Vendure's `payment` table — nothing is estimated.
+
+- *Recipient:* `ops.adminEmail` from the plugin options, else the licence
+  customer, else the address entered in "Email me before it ends". Override
+  it in *Settings → Weekly report*; the card shows the default as the
+  placeholder, when the last report went out and when the next is due.
+- *Turn it off:* untick "Send the weekly report" on the same card (stored in
+  `hulo_plugin_prefs`, no restart). **Send me a test** sends the week-to-date
+  report now; **Preview** opens it in a new tab.
+- *SMTP:* the report goes through the same `SMTP_SERVER`, `SMTP_PORT`,
+  `SMTP_USER`, `SMTP_PASSWORD` and `SMTP_FROM` environment variables the ops
+  e-mails use (falling back to `SMTP_HOST` / `SMTP_PASS`). Without them the
+  card reports "not sent" and nothing else changes. `nodemailer` is a peer
+  dependency.
+- Sending is idempotent across worker replicas (compare-and-set on the
+  last-sent timestamp); a failed send is retried on the next hourly tick.
+
+**Set-up checklist.** The Overview tab opens with the five checks that make
+the plugin useful — Stripe webhook secret, a `stripe-hold` payment method, a
+`bank-transfer` payment method, the trusted client-IP contract (secret header
+or `trustedProxies`) and an ops channel — each a real check against the
+options and the payment-method table, with a link to where it is fixed.
+*Hide* keeps it out of the way once everything is done; it comes back by
+itself if a check regresses. The open items are the "next steps" in the
+weekly report. (`orderOptions.orderByCodeAccessStrategy` lives in the host
+config and cannot be detected — the Settings tab reminds you.)
+
+**Dashboard widget.** *Dashboard → Add widget → Checkout Guard* shows three
+headline figures from the last seven days (held value first, then the
+largest counts), the licence notice when a trial or key is about to end, and
+a link to the plugin page. It needs `ReadOrder`, like the page.
+
+**Value metrics.** Overview tiles now include *Held value* (holds placed in
+the last 30 days, in the holds' currency), *Rate-limit rejections* and
+*Denied order lookups* (both 7 days). The last two come from a small
+`cg_counter` table (one row per day and counter, buffered and written once
+every two seconds, so a burst of 429s costs one statement) and are kept for
+400 days by the retention cron. The same 30-day numbers travel with the
+daily heartbeat and evaluation pings (numbers only, no personal data) so
+renewal and reminder e-mails can say what the plugin did.
 
 ## Compatibility
 
