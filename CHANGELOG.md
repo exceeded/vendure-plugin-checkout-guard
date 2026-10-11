@@ -55,7 +55,12 @@ Merchant engagement release. Two small tables (`cg_counter`, and the shared
 - `ReconciliationService` and `ObservabilityService` accept the new
   `CounterService`; `OpsAlertService` exposes `sendMail()`, `hasSmtp()` and
   `adminEmail()`.
-- Licence SDK dependency raised to `^0.15.0`.
+- **Heartbeat reports the key in force.** The daily ping now reads the
+  active licence through `licenceKeyProvider`, so a key activated from the
+  admin, installed by the purchase claim or restored at boot is reported
+  under its own jti instead of "unlicensed" (the licence server dropped the
+  usage stats for those installs before).
+- Licence SDK dependency raised to `^0.15.1`.
 
 ## [0.1.4] — 2026-09-28
 

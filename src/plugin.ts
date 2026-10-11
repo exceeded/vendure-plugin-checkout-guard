@@ -161,10 +161,16 @@ export class CheckoutGuardPlugin {
         });
         if (status.valid) {
             CheckoutGuardPlugin.licenceStatus = status;
+            CheckoutGuardPlugin.activeLicenceKey = key;
             CheckoutGuardPlugin.evalClientInternal?.stop();
         }
         return status;
     }
+
+    /** The key currently in force (env/init key, admin activation, purchase
+     *  claim or the key restored at boot) — read by the heartbeat on every
+     *  ping so the licence server keeps the usage stats under the right jti. */
+    private static activeLicenceKey: string | null = null;
 
     /** Drop an admin-activated key: back to unlicensed + evaluation. */
     static deactivateRuntimeLicence(): void {
@@ -172,6 +178,7 @@ export class CheckoutGuardPlugin {
             valid: false,
             message: 'No licence key configured. The plugin will run in the free tier.',
         } as LicenceStatus;
+        CheckoutGuardPlugin.activeLicenceKey = null;
         CheckoutGuardPlugin.startEvaluation();
         CheckoutGuardPlugin.evalClientInternal?.start();
     }
@@ -274,6 +281,7 @@ export class CheckoutGuardPlugin {
             revokedIds: CheckoutGuardPlugin.revocation.getRevokedIds(),
         });
         CheckoutGuardPlugin.licenceStatus = status;
+        CheckoutGuardPlugin.activeLicenceKey = status.valid ? (options.licenceKey || null) : null;
         if (!status.valid) {
             CheckoutGuardPlugin.startEvaluation();
             // eslint-disable-next-line no-console
@@ -288,6 +296,7 @@ export class CheckoutGuardPlugin {
                 packageName: PKG_NAME,
                 packageVersion: PKG_VERSION,
                 licenceKey: options.licenceKey,
+                licenceKeyProvider: () => CheckoutGuardPlugin.activeLicenceKey,
                 publicKeyFingerprint: fingerprintPublicKey(HULO_PUBLIC_KEY),
             });
             CheckoutGuardPlugin.heartbeat.start();
