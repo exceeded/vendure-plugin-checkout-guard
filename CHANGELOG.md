@@ -5,6 +5,14 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-10-15
+
+### Fixed
+- An order's channel was resolved as the *lowest* channel id it belongs to.
+  Every order also belongs to the default channel, so on multi-channel stores
+  client-side declines and bank-transfer rows were attributed to the default
+  channel. The highest channel id (the storefront's own) is used now.
+
 ## [0.2.1] — 2026-10-15
 
 ### Added

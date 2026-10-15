@@ -302,7 +302,7 @@ export class ObservabilityService implements OnModuleInit {
         if (!c) return null;
         const rows = await this.db.query(
             `SELECT o.id, o.state,
-                    (SELECT MIN(oc.\`channelId\`) FROM order_channels_channel oc WHERE oc.\`orderId\` = o.id) AS channelId
+                    (SELECT MAX(oc.\`channelId\`) FROM order_channels_channel oc WHERE oc.\`orderId\` = o.id) AS channelId
              FROM \`order\` o WHERE o.code = ? LIMIT 1`,
             [c],
         ).catch(() => []);

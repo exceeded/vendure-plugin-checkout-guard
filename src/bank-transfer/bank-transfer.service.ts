@@ -458,7 +458,7 @@ export class BankTransferService implements OnModuleInit {
         const rows: any[] = await this.db.query(
             `SELECT p.id AS paymentId, p.\`createdAt\` AS paymentCreatedAt, p.amount AS amount, p.metadata AS metadata,
                     o.id AS orderId, o.code AS orderCode,
-                    MIN(occ.\`channelId\`) AS channelId,
+                    MAX(occ.\`channelId\`) AS channelId,
                     t.reminderSentAt AS reminderSentAt
              FROM payment p
              JOIN \`order\` o ON o.id = p.\`orderId\`
