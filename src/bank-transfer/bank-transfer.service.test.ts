@@ -170,7 +170,7 @@ describe('sweep', () => {
     });
 
     it('expires past-due transfers, reminds mid-window ones, skips those no longer Authorized', async () => {
-        sqlRoutes.push({ re: /MIN\(occ\.`channelId`\)/, rows: () => [
+        sqlRoutes.push({ re: /MAX\(occ\.`channelId`\)/, rows: () => [
             candidate(51, days(10), days(3)),            // expired 3 days ago
             candidate(52, days(4), days(-3)),            // reminder due (3 days elapsed), not expired
             candidate(53, days(1), days(-6)),            // nothing due
@@ -200,7 +200,7 @@ describe('sweep', () => {
     });
 
     it('leaves a transfer alone when the cancellation fails, and finishes stranded orders on the next pass', async () => {
-        sqlRoutes.push({ re: /MIN\(occ\.`channelId`\)/, rows: () => [candidate(51, days(10), days(3))] });
+        sqlRoutes.push({ re: /MAX\(occ\.`channelId`\)/, rows: () => [candidate(51, days(10), days(3))] });
         sqlRoutes.push({ re: /AND EXISTS \(SELECT 1 FROM checkout_guard_bank_transfer t WHERE t\.orderId = o\.id AND t\.expiredAt IS NOT NULL\)/, rows: () => [{ orderId: 151, orderCode: 'ORD51' }] });
         conn.repo(Payment).rows = [bankPayment({ id: 51, order: { id: 151, code: 'ORD51', state: 'PaymentAuthorized', currencyCode: 'GBP', channels: [channels[1]] } })];
         conn.repo(Order).rows = [{ id: 151, code: 'ORD51', state: 'PaymentAuthorized', channels: [channels[1]] }];

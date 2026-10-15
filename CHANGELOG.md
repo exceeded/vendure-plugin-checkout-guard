@@ -5,6 +5,11 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-10-15
+
+### Fixed
+- Test expectations for the 0.2.2 channel change (0.2.2 is deprecated on npm; same runtime code).
+
 ## [0.2.2] — 2026-10-15
 
 ### Fixed
