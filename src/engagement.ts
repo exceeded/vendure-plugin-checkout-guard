@@ -23,7 +23,7 @@ export const PREMIUM_FEATURES: string[] = [
 /** The numeric keys reported to the licence server (heartbeat + evaluation). */
 export const STAT_KEYS = [
     'holdsPlaced', 'holdsCaptured', 'holdsCancelled', 'heldValuePence',
-    'bankTransfersConfirmed', 'rateLimitRejections', 'orderAccessDenied', 'orphansFound',
+    'bankTransfersConfirmed', 'rateLimitRejections', 'orderAccessDenied', 'orphansFound', 'cardTestingBlocked',
 ] as const;
 export type StatKey = typeof STAT_KEYS[number];
 
@@ -37,6 +37,7 @@ export const STAT_LABELS: Record<StatKey, { label: string; format: 'count' | 'pe
     rateLimitRejections: { label: 'abusive checkout requests rate-limited', format: 'count' },
     orderAccessDenied: { label: 'order lookups refused to the wrong session', format: 'count' },
     orphansFound: { label: 'orphaned Stripe charges found by reconciliation', format: 'count' },
+    cardTestingBlocked: { label: 'card-testing attempts refused before reaching Stripe', format: 'count' },
 };
 
 /** Numbers only, for the stats providers (no currency, no PII). */

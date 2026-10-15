@@ -5,6 +5,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { ClientIpResolveOptions, getClientIp } from './client-ip';
 import { GUARDS_LOGGER_CTX } from './constants';
 import { bumpCounter } from './counters';
+import { CardTestingGate, CardTestingOptions, cardTestingBlockedBody, resolveCardTestingOptions } from './card-testing';
 
 export interface MutationRateLimit {
     /** Requests allowed per window (token-bucket capacity). */
@@ -61,8 +62,11 @@ function patternFor(name: string): RegExp {
     let pattern = patternCache.get(name);
     if (!pattern) {
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Field selection (optionally aliased): `applyCouponCode(` / `apply: applyCouponCode (`
-        pattern = new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(`);
+        // Field selection (optionally aliased), with or without arguments:
+        // `applyCouponCode(` / `apply: applyCouponCode (` / `createStripePaymentIntent }`.
+        // Argument-less mutations (Vendure's `createStripePaymentIntent`) were
+        // missed by the old `name(` form, so they were never limited.
+        pattern = new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_])`);
         patternCache.set(name, pattern);
     }
     return pattern;
@@ -102,8 +106,13 @@ export function rateLimitBucket(ip: string | null): string | null {
     return groups.slice(0, 4).map(g => g || '0').join(':') + '::/64';
 }
 
+/** Blank out string literals (block and single-line) so a mutation name inside an argument value never counts. */
+export function stripStringLiterals(query: string): string {
+    return query.replace(/"""[\s\S]*?"""/g, '""').replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
+}
+
 export function extractMutationNames(body: unknown, known: Iterable<string>): string[] {
-    const queries = queriesIn(body).map(stripGraphQlComments).filter(q => MUTATION_KEYWORD.test(q));
+    const queries = queriesIn(body).map(stripGraphQlComments).map(stripStringLiterals).filter(q => MUTATION_KEYWORD.test(q));
     if (queries.length === 0) return [];
     const found: string[] = [];
     for (const name of known) {
@@ -129,6 +138,8 @@ export interface MutationRateLimitHandlerOptions {
     maxKeys?: number;
     /** Log hook; defaults to Vendure's `Logger.warn`. */
     onLimited?: (info: { mutation: string; key: string; limit: MutationRateLimit }) => void;
+    /** Card-testing gate (see `card-testing.ts`). Defaults on; pass `false` to disable. */
+    cardTesting?: CardTestingOptions | false;
 }
 
 /** Body of the 429 response. */
@@ -158,8 +169,11 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         Logger.warn(`Rate limit hit: ${mutation} from ${key} (${limit.capacity}/${Math.round(limit.windowMs / 1000)}s)`, GUARDS_LOGGER_CTX);
     });
 
-    return (req: Request, res: Response, next: NextFunction) => {
-        if (names.length === 0 || req.method !== 'POST') {
+    const gateOpts = resolveCardTestingOptions(opts.cardTesting);
+    const gate = gateOpts ? new CardTestingGate(gateOpts) : null;
+
+    const handle = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+        if ((names.length === 0 && !gate) || req.method !== 'POST') {
             next();
             return;
         }
@@ -167,7 +181,8 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
         // form field we do not parse; treat it as invoking every limited
         // mutation so it cannot be used to bypass the limits.
         const contentType = String(req.headers?.['content-type'] || '');
-        const invoked = /^multipart\/form-data/i.test(contentType) ? names : extractMutationNames(req.body, names);
+        const known = gate ? Array.from(new Set([...names, ...gate.opts.mutations])) : names;
+        const invoked = /^multipart\/form-data/i.test(contentType) ? known : extractMutationNames(req.body, known);
         if (invoked.length === 0) {
             next();
             return;
@@ -190,7 +205,30 @@ export function createMutationRateLimitHandler(opts: MutationRateLimitHandlerOpt
                 return;
             }
         }
+        const gated = gate && gate.isActive() ? invoked.filter(m => gate.covers(m)) : [];
+        if (gated.length === 0) {
+            next();
+            return;
+        }
+        // Only the payment mutations wait on the (cached) failure lookup.
+        const ip = getClientIp(req, ipOpts);
+        for (const mutation of gated) {
+            const verdict = await gate!.check(ip, mutation);
+            if (verdict.blocked) {
+                Logger.warn(`Card-testing gate: ${mutation} refused for ${ip} (${verdict.failures} failed attempts; blocked until ${verdict.blockedUntil?.toISOString()})`, GUARDS_LOGGER_CTX);
+                res.status(429);
+                res.setHeader('Retry-After', String(Math.max(60, Math.ceil(((verdict.blockedUntil?.getTime() || Date.now()) - Date.now()) / 1000))));
+                res.setHeader('Cache-Control', 'no-store');
+                res.json(cardTestingBlockedBody(mutation));
+                return;
+            }
+        }
         next();
+    };
+    return (req: Request, res: Response, next: NextFunction) => {
+        // Synchronous up to the first await, so bucket verdicts and pass-throughs
+        // for non-payment mutations still happen before this returns.
+        handle(req, res, next).catch(next);
     };
 }
 

@@ -5,6 +5,29 @@ documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project
 adheres to [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-10-15
+
+### Added
+- **Card-testing gate** (free tier, on by default). Carders run stolen cards
+  through the cheapest product until one works; Radar declines them but every
+  attempt still mints a PaymentIntent and shares the rate-limit buckets with
+  real shoppers. The gate reads the plugin's own failed/client-declined
+  records: once an IP has `maxFailedPerIp` (4) failures in `windowMinutes`
+  (60) the payment mutations (`createStripePaymentIntent`, `addPaymentToOrder`)
+  answer `429 card_testing_blocked` for `blockMinutes` (720), and
+  `CheckoutGuardService.cardTestingVerdict({ orderCode, ip })` lets the host's
+  `paymentIntentCreateParams` hook refuse a new intent once an order has
+  `maxFailedPerOrder` (3) failures. Ops event `payment.card_testing` (once per
+  IP per block), counter `card_testing_block`, stat `cardTestingBlocked`.
+  Configure or disable with the `cardTesting` option.
+
+### Fixed
+- The mutation rate limiter only recognised `name(` — argument-less mutations
+  such as Vendure's `createStripePaymentIntent` were never limited. Names now
+  match as whole words, with string literals blanked first so a name inside an
+  argument value still does not count.
+- `countRecentFailuresForOrder()` added next to `countRecentFailures()`.
+
 ## [0.2.0] — 2026-10-11
 
 Merchant engagement release. Two small tables (`cg_counter`, and the shared

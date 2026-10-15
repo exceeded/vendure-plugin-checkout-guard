@@ -115,6 +115,8 @@ export interface UsageStats {
     rateLimitRejections: number;
     orderAccessDenied: number;
     orphansFound: number;
+    /** Payment attempts refused by the card-testing gate. */
+    cardTestingBlocked: number;
     /** Currency of `heldValuePence` when every hold shares one; null when mixed or none. */
     heldCurrency: string | null;
 }

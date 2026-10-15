@@ -16,6 +16,13 @@
 
 export { GUARDS_LOGGER_CTX } from './constants';
 export { bumpCounter, setCounterSink } from './counters';
+export {
+    CardTestingGate, DEFAULT_CARD_TESTING, cardTestingBlockedBody, resolveCardTestingOptions,
+    setCardTestingBlockListener, setFailureLookup,
+} from './card-testing';
+export type {
+    CardTestingBlockInfo, CardTestingBlockListener, CardTestingOptions, FailureLookup, ResolvedCardTestingOptions,
+} from './card-testing';
 export type { CounterSink, GuardCounterName } from './counters';
 export {
     CG_SESSION_HASH_COLUMN,

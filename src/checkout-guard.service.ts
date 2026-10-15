@@ -5,6 +5,7 @@ import {
     describeLicence, licenceLifecycleNotice, formatStat, smtpTransportFromEnv, LicenceStatus, EvaluationState,
 } from '@huloglobal/vendure-licence-sdk';
 import { ObservabilityService, OpsAlertService, UsageStats, BANK_METHOD_CODE, holdMethodCode } from './observability';
+import { CardTestingOptions, resolveCardTestingOptions } from './guards';
 import {
     ADMIN_ROUTE, BUY_URL, PLUGIN_NAME, PREMIUM_FEATURES, SHORT_ID, SetupItem, buildSetupItems, headlineStats,
     setupTips, toDigestStats, toStatRecord,
@@ -21,6 +22,7 @@ export interface EngagementHooks {
         publicBaseUrl?: string;
         stripe?: { webhookSecret?: string };
         trustedClientIp?: { secret?: string; trustedProxies?: string[] };
+        cardTesting?: CardTestingOptions | false;
     };
     getLicenceStatus: () => LicenceStatus | null;
     getEvalState: () => EvaluationState | null;
@@ -53,6 +55,36 @@ export class CheckoutGuardService {
 
     private get db() {
         return adapterFor(this.connection.rawConnection);
+    }
+
+    /**
+     * Card-testing verdict for the host's `paymentIntentCreateParams` hook
+     * (official Stripe plugin) or any custom payment flow: refuse to create
+     * another payment attempt when the order, or the client IP, has hit the
+     * configured failed-attempt cap inside the window. Never throws.
+     */
+    async cardTestingVerdict(input: { orderCode?: string | null; ip?: string | null }): Promise<{
+        blocked: boolean; reason: 'order' | 'ip' | null; failures: number; message: string | null;
+    }> {
+        const opts = resolveCardTestingOptions(this.hooks?.getOptions().cardTesting);
+        if (!opts) return { blocked: false, reason: null, failures: 0, message: null };
+        try {
+            if (opts.maxFailedPerOrder > 0 && input.orderCode) {
+                const n = await this.observability.countRecentFailuresForOrder(input.orderCode, opts.windowMinutes);
+                if (n >= opts.maxFailedPerOrder) {
+                    Logger.warn(`Card-testing gate: no new payment attempt for order ${input.orderCode} (${n} failures in ${opts.windowMinutes} min)`, loggerCtx);
+                    return { blocked: true, reason: 'order', failures: n, message: 'Too many failed payment attempts on this order. Please contact us to complete your purchase.' };
+                }
+            }
+            if (opts.maxFailedPerIp > 0 && input.ip) {
+                const n = await this.observability.countRecentFailures(input.ip, opts.windowMinutes);
+                if (n >= opts.maxFailedPerIp) {
+                    Logger.warn(`Card-testing gate: no new payment attempt from ${input.ip} (${n} failures in ${opts.windowMinutes} min)`, loggerCtx);
+                    return { blocked: true, reason: 'ip', failures: n, message: 'Too many failed payment attempts. Please try again later or contact us.' };
+                }
+            }
+        } catch { /* fail open: a counting error must not block checkout */ }
+        return { blocked: false, reason: null, failures: 0, message: null };
     }
 
     private licenceStore = new LicenceStore((sql, params) => this.db.query(sql, params));
@@ -133,7 +165,7 @@ export class CheckoutGuardService {
             Logger.warn(`Usage stats unavailable: ${e?.message || e}`, loggerCtx);
             return {
                 holdsPlaced: 0, holdsCaptured: 0, holdsCancelled: 0, heldValuePence: 0, bankTransfersConfirmed: 0,
-                rateLimitRejections: 0, orderAccessDenied: 0, orphansFound: 0, heldCurrency: null,
+                rateLimitRejections: 0, orderAccessDenied: 0, orphansFound: 0, cardTestingBlocked: 0, heldCurrency: null,
             };
         }
     }

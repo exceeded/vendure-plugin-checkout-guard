@@ -157,6 +157,20 @@ export class ObservabilityService implements OnModuleInit {
         return Number(row?.n || 0);
     }
 
+    /** Failed + client-declined attempts recorded against one order code in the last `windowMinutes`. */
+    async countRecentFailuresForOrder(orderCode: string, windowMinutes: number = 60): Promise<number> {
+        const code = trunc(orderCode, 64);
+        if (!code) return 0;
+        const minutes = Math.max(1, Math.min(60 * 24 * 30, Math.floor(Number(windowMinutes) || 60)));
+        const [row] = await this.db.query(
+            `SELECT COUNT(*) AS n FROM ${PAYMENT_EVENT_TABLE}
+             WHERE orderCode = ? AND kind IN ('failed', 'client_declined')
+               AND createdAt > DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+            [code, minutes],
+        ).catch(() => [{ n: 0 }]);
+        return Number(row?.n || 0);
+    }
+
     async listPaymentEvents(filter: {
         kind?: string;
         days?: number | string;
@@ -383,7 +397,7 @@ export class ObservabilityService implements OnModuleInit {
     async usageStats(from: Date, to: Date): Promise<UsageStats> {
         const out: UsageStats = {
             holdsPlaced: 0, holdsCaptured: 0, holdsCancelled: 0, heldValuePence: 0,
-            bankTransfersConfirmed: 0, rateLimitRejections: 0, orderAccessDenied: 0, orphansFound: 0,
+            bankTransfersConfirmed: 0, rateLimitRejections: 0, orderAccessDenied: 0, orphansFound: 0, cardTestingBlocked: 0,
             heldCurrency: null,
         };
         const codes = await this.methodCodesForHandler(holdMethodCode());
@@ -424,6 +438,7 @@ export class ObservabilityService implements OnModuleInit {
             const c = await this.counters.sums(from, to).catch(() => ({} as Record<string, number>));
             out.rateLimitRejections = c.rate_limit || 0;
             out.orderAccessDenied = c.order_access_denied || 0;
+            out.cardTestingBlocked = c.card_testing_block || 0;
         }
         return out;
     }

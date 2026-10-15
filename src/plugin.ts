@@ -18,6 +18,7 @@ import {
 import {
     registerCheckoutGuardCustomFields, trustedClientIpMiddleware, shopApiMutationRateLimitMiddleware,
     SessionHashSubscriber, TrustedClientIpOptions, MutationRateLimitOverrides, setCounterSink,
+    CardTestingOptions, setFailureLookup, setCardTestingBlockListener,
 } from './guards';
 import {
     ObservabilityController, ObservabilityService, OpsAlertService, CounterService, ReconciliationService,
@@ -46,6 +47,8 @@ export interface CheckoutGuardPluginOptions {
     trustedClientIp?: TrustedClientIpOptions;
     /** Token-bucket limits for Shop API mutations, keyed by client IP. */
     rateLimits?: { mutations?: MutationRateLimitOverrides };
+    /** Card-testing gate: failed-attempt caps per IP and per order (default on; `false` disables). */
+    cardTesting?: CardTestingOptions | false;
     /** Where alerts go: Slack / Discord / Teams / Telegram / signed webhook / email. */
     ops?: ObservabilityOpsOptions;
     /** Anonymous `orderByCode` window for the session-bound strategy (default `2h`). */
@@ -112,7 +115,7 @@ export function getOptions(): CheckoutGuardPluginOptions { return cachedOptions;
             stripeHoldRawBodyMiddlewareRegistration,
             trustedClientIpMiddleware(options.trustedClientIp),
             shopApiMutationRateLimitMiddleware(
-                { limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp },
+                { limits: options.rateLimits?.mutations, clientIp: options.trustedClientIp, cardTesting: options.cardTesting },
                 config.apiOptions.shopApiPath,
             ),
         ];
@@ -231,6 +234,18 @@ export class CheckoutGuardPlugin {
         try { events = moduleRef?.get(ObservabilityService, { strict: false }) ?? null; } catch { events = null; }
         try { counters = moduleRef?.get(CounterService, { strict: false }) ?? null; } catch { counters = null; }
         if (counters) { const c = counters; setCounterSink(name => c.bump(name)); }
+        if (events) {
+            const e = events;
+            setFailureLookup((ip, windowMinutes) => e.countRecentFailures(ip, windowMinutes));
+        }
+        setCardTestingBlockListener(info => {
+            if (!ops) return;
+            void ops.alert({
+                event: 'payment.card_testing',
+                text: `Card-testing gate tripped: ${info.ip} made ${info.failures} failed card attempts — payment mutations refused until ${info.blockedUntil.toISOString()} (first refused: ${info.mutation}).`,
+                detail: { ip: info.ip, failures: info.failures, blockedUntil: info.blockedUntil.toISOString(), mutation: info.mutation },
+            } as any);
+        });
         configureStripeHold({
             getOptions: () => options.stripe || {},
             hasPremiumAccess: premium,

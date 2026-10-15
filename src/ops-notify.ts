@@ -33,6 +33,7 @@ export type CheckoutGuardOpsEventName =
     | 'payment.orphan'
     | 'payment.amount_drift'
     | 'payment.client_declined'
+    | 'payment.card_testing'
     | 'hold.authorised'
     | 'hold.captured'
     | 'hold.cancelled'

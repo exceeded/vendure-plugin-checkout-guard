@@ -167,6 +167,30 @@ to both to email the customer. Mark money received from the dashboard.
   comments are stripped before matching, so `applyCouponCode # x\n(` cannot
   slip past the limiter.
 
+- **Card-testing gate** (free, on by default). Every failed or client-declined
+  card attempt is already recorded with its IP and order code; once an IP has
+  4 failures in an hour its `createStripePaymentIntent` / `addPaymentToOrder`
+  calls get `429 { errors: [{ message: 'card_testing_blocked' }] }` for 12 h,
+  and once an order has 3 failures the host can refuse a new PaymentIntent:
+
+  ```ts
+  StripePlugin.init({
+      paymentIntentCreateParams: async (injector, ctx, order) => {
+          const verdict = await injector.get(CheckoutGuardService)
+              .cardTestingVerdict({ orderCode: order.code, ip: getClientIp(ctx.req, trustedClientIp) });
+          if (verdict.blocked) throw new Error(verdict.message!);
+          return {};
+      },
+  })
+  ```
+
+  Tune with `cardTesting: { maxFailedPerIp, maxFailedPerOrder, windowMinutes,
+  blockMinutes, mutations }` or switch off with `cardTesting: false`. Each trip
+  raises the ops event `payment.card_testing` once per IP per block window.
+  The gate keys on the resolved client IP, so `trustedClientIp.trustedProxies`
+  must list **every** hop between the internet and Vendure (CDN ranges, the TLS
+  proxy, a local nginx on loopback) — otherwise all shoppers share one address.
+
 ## Observability
 
 - `POST /checkout-guard/client-decline { orderCode, code, message, paymentIntentId?, amountMinor?, currency? }` —

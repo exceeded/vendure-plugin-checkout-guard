@@ -7,7 +7,7 @@
  * sink the plugin installs at bootstrap (`CounterService`). Until it is
  * installed — and in unit tests — `bumpCounter` is a no-op. Never throws.
  */
-export type GuardCounterName = 'rate_limit' | 'order_access_denied';
+export type GuardCounterName = 'rate_limit' | 'order_access_denied' | 'card_testing_block';
 
 export type CounterSink = (name: GuardCounterName) => void;
 
